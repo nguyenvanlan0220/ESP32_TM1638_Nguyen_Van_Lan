@@ -1,0 +1,14 @@
+# Visual Studio / .NET build artifacts
+[Bb]in/
+[Oo]bj/
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Arduino / PlatformIO temporary files
+.pio/
+.vscode/
+*.tmp
+*.log
