@@ -100,7 +100,13 @@ portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 uint8_t lastStableButtons = 0x00;
 uint8_t rawButtons = 0x00;
 uint32_t lastDebounceTime = 0;
-const uint32_t DEBOUNCE_DELAY_MS = 30;
+const uint32_t DEBOUNCE_DELAY_MS = 25;
+
+// Cấu hình nhấn giữ phím (Long-Press Auto Repeat) cho Tăng/Giảm tốc độ
+uint32_t buttonPressStartTime = 0;
+uint32_t lastSpeedHoldTime = 0;
+const uint32_t HOLD_INITIAL_DELAY_MS = 300;   // Sau 300ms giữ phím sẽ bắt đầu tự động tăng/giảm liên tục
+const uint32_t HOLD_REPEAT_INTERVAL_MS = 65;  // Cứ mỗi 65ms tăng/giảm 1 nấc khi đang giữ phím
 
 uint32_t lastLcdUpdate = 0;
 uint32_t lastSerialReport = 0;
@@ -502,7 +508,7 @@ void loop() {
     // 1. Nhận và thực thi lệnh Serial từ PC
     handleSerial();
 
-    // 2. Đọc phím TM1638 với chống rung
+    // 2. Đọc phím TM1638 với chống rung & hỗ trợ NHẤN GIỮ (Long Press Hold)
     uint8_t reading = tm.readButtons();
     if (reading != rawButtons) {
         rawButtons = reading;
@@ -515,6 +521,8 @@ void loop() {
             lastStableButtons = rawButtons;
 
             if (pressed != 0) {
+                buttonPressStartTime = millis();
+                lastSpeedHoldTime = millis();
                 handleButtonPress(pressed);
             }
 
@@ -524,6 +532,40 @@ void loop() {
                     isRunning = true;
                 } else if (lastStableButtons == 0) {
                     isRunning = false;
+                }
+            }
+        }
+    }
+
+    // 2.1 Xử lý TỰ ĐỘNG TĂNG/GIẢM LIÊN TỤC KHI NHẤN GIỮ (S3: Speed+, S4: Speed-)
+    if ((lastStableButtons & (1 << 2)) || (lastStableButtons & (1 << 3))) {
+        uint32_t holdDuration = millis() - buttonPressStartTime;
+        if (holdDuration >= HOLD_INITIAL_DELAY_MS) {
+            // Giữ càng lâu thì bước tăng tốc độ càng tăng nhanh và mượt mà
+            uint32_t stepVal = SPEED_STEP_SPS;
+            uint32_t interval = HOLD_REPEAT_INTERVAL_MS;
+            if (holdDuration > 1200) {
+                interval = 40; // Tăng tốc độ chu kỳ lặp
+                stepVal = SPEED_STEP_SPS * 2;
+            }
+
+            if (millis() - lastSpeedHoldTime >= interval) {
+                lastSpeedHoldTime = millis();
+
+                if (lastStableButtons & (1 << 2)) {
+                    // S3: Tăng tốc độ
+                    if (currentSpeedSPS + stepVal <= MAX_SPEED_SPS) {
+                        updateTimerSpeed(currentSpeedSPS + stepVal);
+                    } else {
+                        updateTimerSpeed(MAX_SPEED_SPS);
+                    }
+                } else if (lastStableButtons & (1 << 3)) {
+                    // S4: Giảm tốc độ
+                    if (currentSpeedSPS >= MIN_SPEED_SPS + stepVal) {
+                        updateTimerSpeed(currentSpeedSPS - stepVal);
+                    } else {
+                        updateTimerSpeed(MIN_SPEED_SPS);
+                    }
                 }
             }
         }
