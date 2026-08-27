@@ -322,27 +322,65 @@ void handleButtonPress(uint8_t btnMask) {
 }
 
 // ================= GIAO TIẾP SERIAL COMMAND =================
+void sendFullStatusToGUI() {
+    float rpm = ((float)currentSpeedSPS / STEPS_PER_REV) * 60.0;
+    Serial.printf("MSTAT:RUN=%d,DIR=%s,SPD=%lu,RPM=%.1f,POS=%lld,ENA=%d,MODE=%d\n",
+                  isRunning ? 1 : 0, isDirCW ? "CW" : "CCW", currentSpeedSPS, rpm,
+                  currentPosition, isEnabled ? 1 : 0, (int)currentMode);
+    
+    // Gửi dữ liệu hiển thị TM1638
+    char dispStr[9];
+    if (currentMode == MODE_POSITION) {
+        snprintf(dispStr, sizeof(dispStr), "P%7ld", (long)currentPosition);
+    } else {
+        snprintf(dispStr, sizeof(dispStr), "S%4.0f%3s", rpm, isDirCW ? " F" : " r");
+    }
+    Serial.printf("DISP:%s\n", dispStr);
+
+    uint8_t ledMask = 0;
+    if (isRunning) ledMask |= (1 << 0);
+    if (isDirCW)   ledMask |= (1 << 1);
+    if (isEnabled) ledMask |= (1 << 2);
+    uint8_t speedLevel = map(currentSpeedSPS, MIN_SPEED_SPS, MAX_SPEED_SPS, 1, 5);
+    for (uint8_t i = 0; i < speedLevel; i++) ledMask |= (1 << (3 + i));
+    Serial.printf("LEDS:%02X\n", ledMask);
+    Serial.printf("BTN:%02X\n", lastStableButtons);
+}
+
 void executeSerialCommand(const char* cmd) {
     if (strcmp(cmd, "MOTOR:RUN") == 0) {
+        portENTER_CRITICAL(&timerMux);
         isRunning = true;
+        portEXIT_CRITICAL(&timerMux);
         Serial.println("OK:MOTOR:RUN");
+        sendFullStatusToGUI();
     }
     else if (strcmp(cmd, "MOTOR:STOP") == 0) {
+        portENTER_CRITICAL(&timerMux);
         isRunning = false;
+        portEXIT_CRITICAL(&timerMux);
         Serial.println("OK:MOTOR:STOP");
+        sendFullStatusToGUI();
     }
     else if (strcmp(cmd, "MOTOR:DIR:CW") == 0) {
+        portENTER_CRITICAL(&timerMux);
         isDirCW = true;
+        portEXIT_CRITICAL(&timerMux);
         Serial.println("OK:MOTOR:DIR:CW");
+        sendFullStatusToGUI();
     }
     else if (strcmp(cmd, "MOTOR:DIR:CCW") == 0) {
+        portENTER_CRITICAL(&timerMux);
         isDirCW = false;
+        portEXIT_CRITICAL(&timerMux);
         Serial.println("OK:MOTOR:DIR:CCW");
+        sendFullStatusToGUI();
     }
     else if (strncmp(cmd, "MOTOR:SPEED:", 12) == 0) {
         uint32_t spd = (uint32_t)atoi(cmd + 12);
         updateTimerSpeed(spd);
         Serial.printf("OK:MOTOR:SPEED:%lu\n", currentSpeedSPS);
+        sendFullStatusToGUI();
     }
     else if (strncmp(cmd, "MOTOR:MOVE:", 11) == 0) {
         int32_t steps = atoi(cmd + 11);
@@ -352,6 +390,22 @@ void executeSerialCommand(const char* cmd) {
         isRunning = true;
         portEXIT_CRITICAL(&timerMux);
         Serial.printf("OK:MOTOR:MOVE:%ld\n", steps);
+        sendFullStatusToGUI();
+    }
+    else if (strncmp(cmd, "MOTOR:MODE:", 11) == 0) {
+        int m = atoi(cmd + 11);
+        if (m >= 0 && m <= 2) {
+            currentMode = (MotorMode)m;
+        }
+        Serial.printf("OK:MOTOR:MODE:%d\n", (int)currentMode);
+        sendFullStatusToGUI();
+    }
+    else if (strncmp(cmd, "MOTOR:ENA:", 10) == 0) {
+        int ena = atoi(cmd + 10);
+        isEnabled = (ena != 0);
+        digitalWrite(PIN_MOTOR_ENA, isEnabled ? LOW : HIGH);
+        Serial.printf("OK:MOTOR:ENA:%d\n", isEnabled ? 1 : 0);
+        sendFullStatusToGUI();
     }
     else if (strcmp(cmd, "MOTOR:ZERO") == 0) {
         portENTER_CRITICAL(&timerMux);
@@ -359,12 +413,16 @@ void executeSerialCommand(const char* cmd) {
         targetPosition = 0;
         portEXIT_CRITICAL(&timerMux);
         Serial.println("OK:MOTOR:ZERO");
+        sendFullStatusToGUI();
     }
-    else if (strcmp(cmd, "STATUS") == 0) {
-        float rpm = ((float)currentSpeedSPS / STEPS_PER_REV) * 60.0;
-        Serial.printf("MSTAT:RUN=%d,DIR=%s,SPD=%lu,RPM=%.1f,POS=%lld,ENA=%d,MODE=%d\n",
-                      isRunning ? 1 : 0, isDirCW ? "CW" : "CCW", currentSpeedSPS, rpm,
-                      currentPosition, isEnabled ? 1 : 0, (int)currentMode);
+    else if (strncmp(cmd, "BRIGHTNESS:", 11) == 0) {
+        int b = atoi(cmd + 11);
+        if (b >= 0 && b <= 7) {
+            tm.setBrightness((uint8_t)b);
+        }
+    }
+    else if (strcmp(cmd, "STATUS") == 0 || strcmp(cmd, "SYNC") == 0) {
+        sendFullStatusToGUI();
     }
 }
 
@@ -478,11 +536,10 @@ void loop() {
         updateTM1638Display();
     }
 
-    // 4. Báo cáo trạng thái lên Serial định kỳ (mỗi 500ms)
-    if (millis() - lastSerialReport >= 500) {
+    // 4. Báo cáo trạng thái lên Serial định kỳ
+    uint32_t reportInterval = isRunning ? 200 : 500;
+    if (millis() - lastSerialReport >= reportInterval) {
         lastSerialReport = millis();
-        float rpm = ((float)currentSpeedSPS / STEPS_PER_REV) * 60.0;
-        Serial.printf("POS:%lld | SPD:%lu SPS (%.1f RPM) | DIR:%s | RUN:%d | MODE:%d\n",
-                      currentPosition, currentSpeedSPS, rpm, isDirCW ? "CW" : "CCW", isRunning ? 1 : 0, (int)currentMode);
+        sendFullStatusToGUI();
     }
 }
