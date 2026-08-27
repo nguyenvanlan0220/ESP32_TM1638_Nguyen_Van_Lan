@@ -154,7 +154,11 @@ void updateTimerSpeed(uint32_t sps) {
     uint64_t timerPeriodUs = 1000000ULL / currentSpeedSPS;
     
     if (stepTimer != nullptr) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+        timerAlarm(stepTimer, timerPeriodUs, true, 0);
+#else
         timerAlarmWrite(stepTimer, timerPeriodUs, true);
+#endif
     }
 }
 
@@ -380,11 +384,16 @@ void setup() {
     digitalWrite(PIN_MOTOR_ENA, HIGH); // Kích hoạt driver
 
     // 2. Cấu hình Timer ngắt phần cứng cho phát xung bước mượt mà
-    // Timer 0, bộ chia tần 80 (80MHz / 80 = 1MHz, tức 1 tick = 1 microsecond)
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+    stepTimer = timerBegin(1000000); // 1 MHz -> 1 us tick
+    timerAttachInterrupt(stepTimer, &onStepTimer);
+    updateTimerSpeed(currentSpeedSPS);
+#else
     stepTimer = timerBegin(0, 80, true);
     timerAttachInterrupt(stepTimer, &onStepTimer, true);
     updateTimerSpeed(currentSpeedSPS);
     timerAlarmEnable(stepTimer);
+#endif
 
     // 3. Khởi tạo bus I2C & Màn hình LCD 1602
     pinMode(PIN_I2C_SDA, INPUT_PULLUP);
