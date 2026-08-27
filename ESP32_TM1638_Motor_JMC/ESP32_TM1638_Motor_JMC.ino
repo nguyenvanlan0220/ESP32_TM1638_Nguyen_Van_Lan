@@ -107,57 +107,75 @@ uint32_t lastSerialReport = 0;
 char rxBuffer[64];
 uint8_t rxIndex = 0;
 
-// ================= HÀM NGẮT TIMER PHÁT XUNG (STEP ISR) =================
+volatile bool pulseState = false;
+
+// ================= HÀM NGẮT TIMER PHÁT XUNG (STEP ISR - 50% DUTY CYCLE) =================
 void IRAM_ATTR onStepTimer() {
     portENTER_CRITICAL_ISR(&timerMux);
     
     if (isRunning && isEnabled) {
-        if (currentMode == MODE_POSITION) {
-            // Chế độ chạy định vị theo số bước
-            if (currentPosition < targetPosition) {
-                digitalWrite(PIN_MOTOR_DIR, HIGH); // CW
-                digitalWrite(PIN_MOTOR_PUL, HIGH);
-                delayMicroseconds(2);
-                digitalWrite(PIN_MOTOR_PUL, LOW);
-                currentPosition++;
-            } else if (currentPosition > targetPosition) {
-                digitalWrite(PIN_MOTOR_DIR, LOW);  // CCW
-                digitalWrite(PIN_MOTOR_PUL, HIGH);
-                delayMicroseconds(2);
-                digitalWrite(PIN_MOTOR_PUL, LOW);
-                currentPosition--;
+        if (!pulseState) {
+            // Cạnh lên (RISING EDGE)
+            if (currentMode == MODE_POSITION) {
+                if (currentPosition < targetPosition) {
+                    digitalWrite(PIN_MOTOR_DIR, HIGH); // CW
+                    digitalWrite(PIN_MOTOR_PUL, HIGH);
+                    pulseState = true;
+                } else if (currentPosition > targetPosition) {
+                    digitalWrite(PIN_MOTOR_DIR, LOW);  // CCW
+                    digitalWrite(PIN_MOTOR_PUL, HIGH);
+                    pulseState = true;
+                } else {
+                    isRunning = false;
+                    digitalWrite(PIN_MOTOR_PUL, LOW);
+                    pulseState = false;
+                }
             } else {
-                // Đã tới đích
-                isRunning = false;
+                digitalWrite(PIN_MOTOR_DIR, isDirCW ? HIGH : LOW);
+                digitalWrite(PIN_MOTOR_PUL, HIGH);
+                pulseState = true;
             }
         } else {
-            // Chế độ quay liên tục / Jog
-            digitalWrite(PIN_MOTOR_DIR, isDirCW ? HIGH : LOW);
-            digitalWrite(PIN_MOTOR_PUL, HIGH);
-            delayMicroseconds(2);
+            // Cạnh xuống (FALLING EDGE) -> Hoàn thành 1 xung bước
             digitalWrite(PIN_MOTOR_PUL, LOW);
+            pulseState = false;
 
-            if (isDirCW) currentPosition++;
-            else currentPosition--;
+            if (currentMode == MODE_POSITION) {
+                if (currentPosition < targetPosition) {
+                    currentPosition++;
+                    if (currentPosition >= targetPosition) isRunning = false;
+                } else if (currentPosition > targetPosition) {
+                    currentPosition--;
+                    if (currentPosition <= targetPosition) isRunning = false;
+                }
+            } else {
+                if (isDirCW) currentPosition++;
+                else currentPosition--;
+            }
         }
+    } else {
+        digitalWrite(PIN_MOTOR_PUL, LOW);
+        pulseState = false;
     }
 
     portEXIT_CRITICAL_ISR(&timerMux);
 }
 
-// Cập nhật chu kỳ ngắt timer theo tốc độ SPS
+// Cập nhật chu kỳ ngắt timer theo tốc độ SPS (ngắt ở tần số 2 * SPS để tạo xung vuông 50%)
 void updateTimerSpeed(uint32_t sps) {
     if (sps < MIN_SPEED_SPS) sps = MIN_SPEED_SPS;
     if (sps > MAX_SPEED_SPS) sps = MAX_SPEED_SPS;
 
     currentSpeedSPS = sps;
-    uint64_t timerPeriodUs = 1000000ULL / currentSpeedSPS;
+    // Ngắt mỗi nửa chu kỳ xung (Half-period)
+    uint64_t halfPeriodUs = 500000ULL / currentSpeedSPS;
+    if (halfPeriodUs < 10) halfPeriodUs = 10;
     
     if (stepTimer != nullptr) {
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
-        timerAlarm(stepTimer, timerPeriodUs, true, 0);
+        timerAlarm(stepTimer, halfPeriodUs, true, 0);
 #else
-        timerAlarmWrite(stepTimer, timerPeriodUs, true);
+        timerAlarmWrite(stepTimer, halfPeriodUs, true);
 #endif
     }
 }
@@ -290,7 +308,7 @@ void handleButtonPress(uint8_t btnMask) {
     // S7: Bật / Tắt Driver (Enable / Free)
     else if (btnMask & (1 << 6)) {
         isEnabled = !isEnabled;
-        digitalWrite(PIN_MOTOR_ENA, isEnabled ? HIGH : LOW);
+        digitalWrite(PIN_MOTOR_ENA, isEnabled ? LOW : HIGH); // LOW: Khóa trục, HIGH: Thả tự do
         Serial.printf("[MOTOR] ENABLE: %s\n", isEnabled ? "LOCKED (ENA)" : "FREE (DIS)");
     }
     // S8: Reset vị trí về 0 (Home/Zero)
@@ -381,7 +399,7 @@ void setup() {
 
     digitalWrite(PIN_MOTOR_PUL, LOW);
     digitalWrite(PIN_MOTOR_DIR, HIGH); // Mặc định CW
-    digitalWrite(PIN_MOTOR_ENA, HIGH); // Kích hoạt driver
+    digitalWrite(PIN_MOTOR_ENA, LOW);  // LOW = Enable (Khóa trục/Sẵn sàng chạy) cho Driver 2HSS57
 
     // 2. Cấu hình Timer ngắt phần cứng cho phát xung bước mượt mà
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
