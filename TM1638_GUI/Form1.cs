@@ -9,21 +9,39 @@ namespace TM1638_GUI
     public partial class Form1 : Form
     {
         private SerialPort? serialPort;
+        private StringBuilder rxBuffer = new StringBuilder();
+        private readonly object lockObj = new object();
 
-        // Trạng thái 2 Động cơ
-        private bool isRunM1 = false, isDirCW1 = true, isEna1 = true;
-        private uint speedSPS1 = 1600;
-        private long pos1 = 0;
+        // Cấu trúc trạng thái cho 4 Động cơ
+        private class MotorUIState
+        {
+            public bool IsRunning = false;
+            public bool IsDirCW = true;
+            public bool IsEnabled = true;
+            public uint SpeedSPS = 1600;
+            public long CurrentPos = 0;
 
-        private bool isRunM2 = false, isDirCW2 = true, isEna2 = true;
-        private uint speedSPS2 = 1600;
-        private long pos2 = 0;
+            public bool UI_Dirty = true; // Cờ báo cần vẽ lại UI
 
-        private int selectedTarget = 0; // 0: M1, 1: M2, 2: BOTH
+            public Button BtnRun = null!;
+            public Button BtnDir = null!;
+            public Button BtnEna = null!;
+            public TrackBar TbSpeed = null!;
+            public Label LblSpeedVal = null!;
+            public Label LblPos = null!;
+            public TextBox TxtMove = null!;
+        }
+
+        private MotorUIState[] motors = new MotorUIState[4];
+
+        private int selectedTarget = 0; // 0: M1, 1: M2, 2: M3, 3: M4, 4: ALL
         private int currentMode = 0;    // 0: CONT, 1: POS, 2: JOG
 
         private byte currentLedMask = 0x00;
         private byte currentButtonMask = 0x00;
+        private string current7SegText = "        ";
+
+        private bool stateDirty = true;
 
         // UI Controls - Connection
         private ComboBox cmbPorts = null!;
@@ -32,21 +50,12 @@ namespace TM1638_GUI
         private Label lblStatus = null!;
         private Panel pnlStatusIndicator = null!;
 
-        // UI Controls - Motor 1 & Motor 2
-        private Button btnRunM1 = null!, btnDirM1 = null!;
-        private TrackBar tbSpeedM1 = null!;
-        private Label lblSpeedValM1 = null!;
-        private TextBox txtMoveM1 = null!;
-
-        private Button btnRunM2 = null!, btnDirM2 = null!;
-        private TrackBar tbSpeedM2 = null!;
-        private Label lblSpeedValM2 = null!;
-        private TextBox txtMoveM2 = null!;
-
+        // Master Control
         private Button btnRunAll = null!, btnStopAll = null!, btnZeroAll = null!;
-        private RadioButton rbSelM1 = null!, rbSelM2 = null!, rbSelBoth = null!;
+        private RadioButton[] rbTargets = new RadioButton[5];
+        private RadioButton[] rbModes = new RadioButton[3];
 
-        // Simulator
+        // Hardware Simulator
         private Label lblLcdLine1 = null!, lblLcdLine2 = null!;
         private Label[] lblDigits = new Label[8];
         private Button[] btnLeds = new Button[8];
@@ -55,44 +64,60 @@ namespace TM1638_GUI
         private RichTextBox rtbLog = null!;
         private TextBox txtCustomCmd = null!;
 
+        // Timer Render UI mượt mà 20 FPS (50ms)
+        private System.Windows.Forms.Timer uiRenderTimer = null!;
+
         public Form1()
         {
             InitializeComponent();
+            this.DoubleBuffered = true;
+            this.SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+
+            for (int i = 0; i < 4; i++)
+            {
+                motors[i] = new MotorUIState();
+            }
             SetupCustomUI();
             RefreshComPorts();
+
+            // Khởi tạo Timer Render UI
+            uiRenderTimer = new System.Windows.Forms.Timer();
+            uiRenderTimer.Interval = 50; // 20 FPS refresh mượt mà
+            uiRenderTimer.Tick += UiRenderTimer_Tick;
+            uiRenderTimer.Start();
         }
 
         private void SetupCustomUI()
         {
-            this.Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
+            this.Font = new Font("Segoe UI", 9f, FontStyle.Regular);
             this.ForeColor = Color.White;
-            this.Text = "ESP32-S3 Dual Motor Controller Dashboard - Nguyễn Văn Lân";
+            this.Text = "ESP32-S3 QUAD & DUAL MOTOR CONTROL DASHBOARD - NGUYỄN VĂN LÂN";
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
-            this.ClientSize = new Size(1040, 800);
-            this.BackColor = Color.FromArgb(20, 23, 30);
+            this.ClientSize = new Size(1180, 940);
+            this.BackColor = Color.FromArgb(16, 19, 26);
 
-            // 1. HEADER
+            // 1. HEADER PANEL
             Panel pnlHeader = new Panel
             {
                 Location = new Point(0, 0),
-                Size = new Size(1040, 65),
-                BackColor = Color.FromArgb(28, 32, 44)
+                Size = new Size(1180, 65),
+                BackColor = Color.FromArgb(24, 29, 42)
             };
             Label lblTitle = new Label
             {
-                Text = "⚡ ESP32-S3 DUAL MOTOR (M1 + M2) HYBRID SERVO DASHBOARD",
-                Font = new Font("Segoe UI", 12.5f, FontStyle.Bold),
-                ForeColor = Color.FromArgb(0, 220, 255),
+                Text = "⚡ ESP32-S3 QUAD & DUAL MOTOR HYBRID SERVO DASHBOARD",
+                Font = new Font("Segoe UI", 13f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(0, 225, 255),
                 Location = new Point(20, 10),
                 AutoSize = true
             };
             Label lblSub = new Label
             {
-                Text = "Điều Khiển Độc Lập & Đồng Thời 2 Động Cơ Bước JMC-2HSS57 + TM1638 + LCD I2C | Nguyễn Văn Lân",
+                Text = "Hệ thống điều khiển Đa Động Cơ JMC 2HSS57 + Module TM1638 + LCD 1602 I2C | Tác giả: Nguyễn Văn Lân",
                 Font = new Font("Segoe UI", 8.5f, FontStyle.Regular),
-                ForeColor = Color.FromArgb(160, 175, 195),
+                ForeColor = Color.FromArgb(150, 170, 195),
                 Location = new Point(22, 38),
                 AutoSize = true
             };
@@ -101,179 +126,205 @@ namespace TM1638_GUI
             this.Controls.Add(pnlHeader);
 
             // 2. KẾT NỐI SERIAL
-            GroupBox gbConnect = CreateCard("1. KẾT NỐI CỔNG COM", new Point(15, 75), new Size(1010, 65));
+            GroupBox gbConnect = CreateCard("1. KẾT NỐI CỔNG COM / SERIAL", new Point(15, 75), new Size(1150, 65));
             Label lblPort = new Label { Text = "Cổng COM:", Location = new Point(15, 26), AutoSize = true };
             cmbPorts = new ComboBox
             {
                 Location = new Point(95, 23),
-                Size = new Size(120, 28),
+                Size = new Size(130, 28),
                 DropDownStyle = ComboBoxStyle.DropDownList,
-                BackColor = Color.FromArgb(40, 44, 58),
+                BackColor = Color.FromArgb(36, 42, 56),
                 ForeColor = Color.White
             };
-            btnRefreshPorts = CreateButton("Làm Mới", new Point(225, 22), new Size(80, 30), Color.FromArgb(50, 55, 70));
+            btnRefreshPorts = CreateButton("Làm Mới", new Point(235, 22), new Size(85, 30), Color.FromArgb(48, 56, 74));
             btnRefreshPorts.Click += (s, e) => RefreshComPorts();
 
-            btnConnect = CreateButton("KẾT NỐI", new Point(315, 22), new Size(115, 30), Color.FromArgb(0, 160, 90));
+            btnConnect = CreateButton("KẾT NỐI", new Point(330, 22), new Size(125, 30), Color.FromArgb(0, 170, 95));
             btnConnect.Click += BtnConnect_Click;
 
-            Button btnSync = CreateButton("Đồng Bộ", new Point(440, 22), new Size(85, 30), Color.FromArgb(70, 80, 105));
+            Button btnSync = CreateButton("Đồng Bộ (SYNC)", new Point(465, 22), new Size(130, 30), Color.FromArgb(65, 78, 105));
             btnSync.Click += (s, e) => SendCommand("SYNC");
 
-            pnlStatusIndicator = new Panel { Location = new Point(545, 29), Size = new Size(15, 15), BackColor = Color.Red };
-            lblStatus = new Label { Text = "Chưa kết nối", Location = new Point(568, 27), AutoSize = true, ForeColor = Color.FromArgb(220, 100, 100) };
+            pnlStatusIndicator = new Panel { Location = new Point(620, 29), Size = new Size(15, 15), BackColor = Color.Red };
+            lblStatus = new Label { Text = "Chưa kết nối COM", Location = new Point(643, 27), AutoSize = true, ForeColor = Color.FromArgb(230, 90, 90), Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
 
             gbConnect.Controls.AddRange(new Control[] { lblPort, cmbPorts, btnRefreshPorts, btnConnect, btnSync, pnlStatusIndicator, lblStatus });
             this.Controls.Add(gbConnect);
 
-            // 3. ĐIỀU KHIỂN ĐỘNG CƠ 1 (M1)
-            GroupBox gbM1 = CreateCard("2. ĐIỀU KHIỂN ĐỘNG CƠ 1 (MOTOR 1 - M1)", new Point(15, 148), new Size(495, 240));
+            // 3. ĐIỀU KHIỂN 4 ĐỘNG CƠ (2x2 GRID)
+            int cardW = 568;
+            int cardH = 220;
+            Point[] cardLocs = new Point[] {
+                new Point(15, 148),
+                new Point(597, 148),
+                new Point(15, 376),
+                new Point(597, 376)
+            };
 
-            btnRunM1 = CreateButton("▶ CHẠY M1", new Point(20, 28), new Size(140, 42), Color.FromArgb(0, 160, 80));
-            btnRunM1.Click += (s, e) => SendCommand(isRunM1 ? "M1:STOP" : "M1:RUN");
+            for (int i = 0; i < 4; i++)
+            {
+                int motorIdx = i;
+                GroupBox gbM = CreateCard($"2.{i + 1} ĐIỀU KHIỂN ĐỘNG CƠ {i + 1} (MOTOR {i + 1} - M{i + 1})", cardLocs[i], new Size(cardW, cardH));
 
-            btnDirM1 = CreateButton("↻ THUẬN (CW)", new Point(170, 28), new Size(140, 42), Color.FromArgb(0, 130, 200));
-            btnDirM1.Click += (s, e) => SendCommand(isDirCW1 ? "M1:DIR:CCW" : "M1:DIR:CW");
+                motors[i].BtnRun = CreateButton($"▶ CHẠY M{i + 1}", new Point(15, 25), new Size(125, 36), Color.FromArgb(0, 160, 80));
+                motors[i].BtnRun.Click += (s, e) => SendCommand(motors[motorIdx].IsRunning ? $"M{motorIdx + 1}:STOP" : $"M{motorIdx + 1}:RUN");
 
-            Button btnZeroM1 = CreateButton("↺ RESET M1", new Point(320, 28), new Size(155, 42), Color.FromArgb(140, 70, 30));
-            btnZeroM1.Click += (s, e) => SendCommand("M1:MOVE:0");
+                motors[i].BtnDir = CreateButton("↻ THUẬN (CW)", new Point(148, 25), new Size(130, 36), Color.FromArgb(0, 130, 200));
+                motors[i].BtnDir.Click += (s, e) => SendCommand(motors[motorIdx].IsDirCW ? $"M{motorIdx + 1}:DIR:CCW" : $"M{motorIdx + 1}:DIR:CW");
 
-            lblSpeedValM1 = new Label { Text = "Tốc độ M1: 1600 SPS (~ 60 RPM)", Location = new Point(20, 78), AutoSize = true, ForeColor = Color.Yellow, Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
-            tbSpeedM1 = new TrackBar { Minimum = 200, Maximum = 16000, Value = 1600, TickFrequency = 1000, Location = new Point(15, 98), Size = new Size(460, 45) };
-            tbSpeedM1.Scroll += (s, e) => { float rpm = (tbSpeedM1.Value / 1600.0f) * 60.0f; lblSpeedValM1.Text = $"Tốc độ M1: {tbSpeedM1.Value} SPS (~ {rpm:F0} RPM)"; };
-            tbSpeedM1.MouseUp += (s, e) => SendCommand($"M1:SPEED:{tbSpeedM1.Value}");
+                motors[i].BtnEna = CreateButton("🔒 KHÓA TRỤC", new Point(286, 25), new Size(130, 36), Color.FromArgb(100, 50, 150));
+                motors[i].BtnEna.Click += (s, e) => SendCommand(motors[motorIdx].IsEnabled ? $"M{motorIdx + 1}:DISABLE" : $"M{motorIdx + 1}:ENABLE");
 
-            Label lblMove1 = new Label { Text = "Quay M1:", Location = new Point(20, 148), AutoSize = true };
-            txtMoveM1 = new TextBox { Text = "1600", Location = new Point(90, 146), Size = new Size(70, 26), BackColor = Color.FromArgb(40, 44, 58), ForeColor = Color.White };
-            Button btnStepM1 = CreateButton("Chạy Bước", new Point(170, 144), new Size(95, 28), Color.FromArgb(0, 140, 190));
-            btnStepM1.Click += (s, e) => { if (int.TryParse(txtMoveM1.Text, out int st)) SendCommand($"M1:MOVE:{st}"); };
+                Button btnZeroM = CreateButton("↺ RESET 0", new Point(424, 25), new Size(128, 36), Color.FromArgb(150, 70, 30));
+                btnZeroM.Click += (s, e) => SendCommand($"M{motorIdx + 1}:MOVE:0");
 
-            Button btnRev1M1 = CreateButton("+1 Vòng", new Point(275, 144), new Size(90, 28), Color.FromArgb(60, 70, 90));
-            btnRev1M1.Click += (s, e) => SendCommand("M1:MOVE:1600");
+                motors[i].LblSpeedVal = new Label { Text = $"Tốc độ M{i + 1}: 1600 SPS (~ 60 RPM)", Location = new Point(15, 68), AutoSize = true, ForeColor = Color.Yellow, Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
+                motors[i].LblPos = new Label { Text = "Vị trí: 0 xung", Location = new Point(340, 68), AutoSize = true, ForeColor = Color.FromArgb(0, 225, 255), Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
 
-            Button btnRev5M1 = CreateButton("+5 Vòng", new Point(375, 144), new Size(100, 28), Color.FromArgb(60, 70, 90));
-            btnRev5M1.Click += (s, e) => SendCommand("M1:MOVE:8000");
+                motors[i].TbSpeed = new TrackBar { Minimum = 200, Maximum = 16000, Value = 1600, TickFrequency = 1000, Location = new Point(10, 88), Size = new Size(545, 45) };
+                motors[i].TbSpeed.Scroll += (s, e) => {
+                    float rpm = (motors[motorIdx].TbSpeed.Value / 1600.0f) * 60.0f;
+                    motors[motorIdx].LblSpeedVal.Text = $"Tốc độ M{motorIdx + 1}: {motors[motorIdx].TbSpeed.Value} SPS (~ {rpm:F0} RPM)";
+                };
+                motors[i].TbSpeed.MouseUp += (s, e) => SendCommand($"M{motorIdx + 1}:SPEED:{motors[motorIdx].TbSpeed.Value}");
 
-            gbM1.Controls.AddRange(new Control[] { btnRunM1, btnDirM1, btnZeroM1, lblSpeedValM1, tbSpeedM1, lblMove1, txtMoveM1, btnStepM1, btnRev1M1, btnRev5M1 });
-            this.Controls.Add(gbM1);
+                Label lblMove = new Label { Text = "Bước xung:", Location = new Point(15, 138), AutoSize = true };
+                motors[i].TxtMove = new TextBox { Text = "1600", Location = new Point(90, 135), Size = new Size(80, 26), BackColor = Color.FromArgb(36, 42, 56), ForeColor = Color.White };
+                
+                Button btnStep = CreateButton("Chạy Bước", new Point(180, 134), new Size(105, 28), Color.FromArgb(0, 140, 190));
+                btnStep.Click += (s, e) => { if (int.TryParse(motors[motorIdx].TxtMove.Text, out int st)) SendCommand($"M{motorIdx + 1}:MOVE:{st}"); };
 
-            // 4. ĐIỀU KHIỂN ĐỘNG CƠ 2 (M2)
-            GroupBox gbM2 = CreateCard("3. ĐIỀU KHIỂN ĐỘNG CƠ 2 (MOTOR 2 - M2)", new Point(530, 148), new Size(495, 240));
+                Button btnRev1 = CreateButton("+1 Vòng", new Point(295, 134), new Size(120, 28), Color.FromArgb(55, 65, 85));
+                btnRev1.Click += (s, e) => SendCommand($"M{motorIdx + 1}:MOVE:1600");
 
-            btnRunM2 = CreateButton("▶ CHẠY M2", new Point(20, 28), new Size(140, 42), Color.FromArgb(0, 160, 80));
-            btnRunM2.Click += (s, e) => SendCommand(isRunM2 ? "M2:STOP" : "M2:RUN");
+                Button btnRev5 = CreateButton("+5 Vòng", new Point(425, 134), new Size(127, 28), Color.FromArgb(55, 65, 85));
+                btnRev5.Click += (s, e) => SendCommand($"M{motorIdx + 1}:MOVE:8000");
 
-            btnDirM2 = CreateButton("↻ THUẬN (CW)", new Point(170, 28), new Size(140, 42), Color.FromArgb(0, 130, 200));
-            btnDirM2.Click += (s, e) => SendCommand(isDirCW2 ? "M2:DIR:CCW" : "M2:DIR:CW");
+                gbM.Controls.AddRange(new Control[] {
+                    motors[i].BtnRun, motors[i].BtnDir, motors[i].BtnEna, btnZeroM,
+                    motors[i].LblSpeedVal, motors[i].LblPos, motors[i].TbSpeed,
+                    lblMove, motors[i].TxtMove, btnStep, btnRev1, btnRev5
+                });
+                this.Controls.Add(gbM);
+            }
 
-            Button btnZeroM2 = CreateButton("↺ RESET M2", new Point(320, 28), new Size(155, 42), Color.FromArgb(140, 70, 30));
-            btnZeroM2.Click += (s, e) => SendCommand("M2:MOVE:0");
+            // 4. ĐIỀU KHIỂN TỔNG & CẤU HÌNH MODE / TARGET
+            GroupBox gbMaster = CreateCard("3. ĐIỀU KHIỂN TỔNG & CẤU HÌNH TM1638", new Point(15, 604), new Size(1150, 68));
 
-            lblSpeedValM2 = new Label { Text = "Tốc độ M2: 1600 SPS (~ 60 RPM)", Location = new Point(20, 78), AutoSize = true, ForeColor = Color.Yellow, Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
-            tbSpeedM2 = new TrackBar { Minimum = 200, Maximum = 16000, Value = 1600, TickFrequency = 1000, Location = new Point(15, 98), Size = new Size(460, 45) };
-            tbSpeedM2.Scroll += (s, e) => { float rpm = (tbSpeedM2.Value / 1600.0f) * 60.0f; lblSpeedValM2.Text = $"Tốc độ M2: {tbSpeedM2.Value} SPS (~ {rpm:F0} RPM)"; };
-            tbSpeedM2.MouseUp += (s, e) => SendCommand($"M2:SPEED:{tbSpeedM2.Value}");
-
-            Label lblMove2 = new Label { Text = "Quay M2:", Location = new Point(20, 148), AutoSize = true };
-            txtMoveM2 = new TextBox { Text = "1600", Location = new Point(90, 146), Size = new Size(70, 26), BackColor = Color.FromArgb(40, 44, 58), ForeColor = Color.White };
-            Button btnStepM2 = CreateButton("Chạy Bước", new Point(170, 144), new Size(95, 28), Color.FromArgb(0, 140, 190));
-            btnStepM2.Click += (s, e) => { if (int.TryParse(txtMoveM2.Text, out int st)) SendCommand($"M2:MOVE:{st}"); };
-
-            Button btnRev1M2 = CreateButton("+1 Vòng", new Point(275, 144), new Size(90, 28), Color.FromArgb(60, 70, 90));
-            btnRev1M2.Click += (s, e) => SendCommand("M2:MOVE:1600");
-
-            Button btnRev5M2 = CreateButton("+5 Vòng", new Point(375, 144), new Size(100, 28), Color.FromArgb(60, 70, 90));
-            btnRev5M2.Click += (s, e) => SendCommand("M2:MOVE:8000");
-
-            gbM2.Controls.AddRange(new Control[] { btnRunM2, btnDirM2, btnZeroM2, lblSpeedValM2, tbSpeedM2, lblMove2, txtMoveM2, btnStepM2, btnRev1M2, btnRev5M2 });
-            this.Controls.Add(gbM2);
-
-            // 5. ĐIỀU KHIỂN DUAL & MỤC TIÊU TM1638
-            GroupBox gbMasterAll = CreateCard("4. ĐIỀU KHIỂN TỔNG & CHỌN ĐỘNG CƠ CỦA TM1638", new Point(15, 395), new Size(1010, 65));
-
-            btnRunAll = CreateButton("▶ CHẠY CẢ 2 MOTOR", new Point(20, 22), new Size(185, 32), Color.FromArgb(0, 160, 80));
+            btnRunAll = CreateButton("▶ CHẠY TẤT CẢ", new Point(15, 22), new Size(150, 34), Color.FromArgb(0, 160, 80));
             btnRunAll.Click += (s, e) => SendCommand("MOTOR:RUN_ALL");
 
-            btnStopAll = CreateButton("⏸ DỪNG CẢ 2 MOTOR", new Point(215, 22), new Size(185, 32), Color.FromArgb(200, 40, 40));
+            btnStopAll = CreateButton("⏸ DỪNG TẤT CẢ", new Point(175, 22), new Size(150, 34), Color.FromArgb(200, 40, 40));
             btnStopAll.Click += (s, e) => SendCommand("MOTOR:STOP_ALL");
 
-            btnZeroAll = CreateButton("↺ RESET CẢ 2 VỀ 0", new Point(410, 22), new Size(160, 32), Color.FromArgb(150, 70, 30));
+            btnZeroAll = CreateButton("↺ RESET TẤT CẢ VỀ 0", new Point(335, 22), new Size(170, 34), Color.FromArgb(150, 70, 30));
             btnZeroAll.Click += (s, e) => SendCommand("MOTOR:ZERO_ALL");
 
-            Label lblSelTag = new Label { Text = "Mục tiêu TM1638:", Location = new Point(590, 27), AutoSize = true, Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
-            rbSelM1 = new RadioButton { Text = "M1", Location = new Point(710, 26), AutoSize = true, Checked = true };
-            rbSelM2 = new RadioButton { Text = "M2", Location = new Point(765, 26), AutoSize = true };
-            rbSelBoth = new RadioButton { Text = "Cả 2 (BOTH)", Location = new Point(820, 26), AutoSize = true };
+            Label lblSelTag = new Label { Text = "Mục tiêu TM1638:", Location = new Point(520, 29), AutoSize = true, Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
+            string[] tgtNames = { "M1", "M2", "M3", "M4", "Cả 4 (ALL)" };
+            int posX = 645;
+            for (int i = 0; i < 5; i++)
+            {
+                int tgtIdx = i;
+                rbTargets[i] = new RadioButton { Text = tgtNames[i], Location = new Point(posX, 27), AutoSize = true, Checked = (i == 0) };
+                rbTargets[i].CheckedChanged += (s, e) => { if (rbTargets[tgtIdx].Checked) SendCommand($"MOTOR:SEL:{tgtIdx}"); };
+                gbMaster.Controls.Add(rbTargets[i]);
+                posX += (i == 4) ? 100 : 55;
+            }
 
-            rbSelM1.CheckedChanged += (s, e) => { if (rbSelM1.Checked) SendCommand("MOTOR:SEL:0"); };
-            rbSelM2.CheckedChanged += (s, e) => { if (rbSelM2.Checked) SendCommand("MOTOR:SEL:1"); };
-            rbSelBoth.CheckedChanged += (s, e) => { if (rbSelBoth.Checked) SendCommand("MOTOR:SEL:2"); };
+            Label lblModeTag = new Label { Text = "Chế độ:", Location = new Point(950, 29), AutoSize = true, Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
+            string[] modeNames = { "CONT", "POS", "JOG" };
+            posX = 1005;
+            for (int i = 0; i < 3; i++)
+            {
+                int modeIdx = i;
+                rbModes[i] = new RadioButton { Text = modeNames[i], Location = new Point(posX, 27), AutoSize = true, Checked = (i == 0) };
+                rbModes[i].CheckedChanged += (s, e) => { if (rbModes[modeIdx].Checked) SendCommand($"MOTOR:MODE:{modeIdx}"); };
+                gbMaster.Controls.Add(rbModes[i]);
+                posX += 45;
+            }
 
-            gbMasterAll.Controls.AddRange(new Control[] { btnRunAll, btnStopAll, btnZeroAll, lblSelTag, rbSelM1, rbSelM2, rbSelBoth });
-            this.Controls.Add(gbMasterAll);
+            gbMaster.Controls.AddRange(new Control[] { btnRunAll, btnStopAll, btnZeroAll, lblSelTag, lblModeTag });
+            this.Controls.Add(gbMaster);
 
-            // 6. SIMULATOR MÀN HÌNH HARDWARE
-            GroupBox gbSim = CreateCard("5. MÔ PHỎNG MÀN HÌNH PHẦN CỨNG (LCD 1602 & TM1638)", new Point(15, 468), new Size(1010, 145));
+            // 5. MÔ PHỎNG PHẦN CỨNG (LCD 1602 & TM1638 LED 7 ĐOẠN)
+            GroupBox gbSim = CreateCard("4. MÔ PHỎNG MÀN HÌNH HARDWARE (LCD 1602 & TM1638)", new Point(15, 680), new Size(1150, 135));
 
-            Panel pnlLcd = new Panel { Location = new Point(20, 25), Size = new Size(390, 75), BackColor = Color.FromArgb(10, 45, 60), BorderStyle = BorderStyle.Fixed3D };
-            lblLcdLine1 = new Label { Text = "M1:STOP   60CW  *", Font = new Font("Consolas", 13f, FontStyle.Bold), ForeColor = Color.FromArgb(0, 255, 230), Location = new Point(10, 10), AutoSize = true };
-            lblLcdLine2 = new Label { Text = "M2:STOP  120CCW  ", Font = new Font("Consolas", 13f, FontStyle.Bold), ForeColor = Color.FromArgb(0, 255, 230), Location = new Point(10, 38), AutoSize = true };
+            Panel pnlLcd = new Panel { Location = new Point(15, 23), Size = new Size(460, 78), BackColor = Color.FromArgb(8, 40, 52), BorderStyle = BorderStyle.Fixed3D };
+            lblLcdLine1 = new Label { Text = "1*+ 60  2:+ 60", Font = new Font("Consolas", 13f, FontStyle.Bold), ForeColor = Color.FromArgb(0, 255, 230), Location = new Point(8, 10), AutoSize = true };
+            lblLcdLine2 = new Label { Text = "3:+ 60  4:+ 60", Font = new Font("Consolas", 13f, FontStyle.Bold), ForeColor = Color.FromArgb(0, 255, 230), Location = new Point(8, 40), AutoSize = true };
             pnlLcd.Controls.Add(lblLcdLine1); pnlLcd.Controls.Add(lblLcdLine2);
             gbSim.Controls.Add(pnlLcd);
 
-            Panel pnl7Seg = new Panel { Location = new Point(430, 25), Size = new Size(560, 75), BackColor = Color.Black, BorderStyle = BorderStyle.FixedSingle };
+            Panel pnl7Seg = new Panel { Location = new Point(490, 23), Size = new Size(645, 78), BackColor = Color.Black, BorderStyle = BorderStyle.FixedSingle };
             for (int i = 0; i < 8; i++)
             {
-                lblDigits[i] = new Label { Text = " ", Font = new Font("Consolas", 22f, FontStyle.Bold), ForeColor = Color.Lime, Size = new Size(63, 58), Location = new Point(6 + i * 69, 7), TextAlign = ContentAlignment.MiddleCenter, BackColor = Color.FromArgb(12, 18, 12) };
+                lblDigits[i] = new Label { Text = " ", Font = new Font("Consolas", 24f, FontStyle.Bold), ForeColor = Color.Lime, Size = new Size(73, 62), Location = new Point(6 + i * 79, 7), TextAlign = ContentAlignment.MiddleCenter, BackColor = Color.FromArgb(12, 20, 12) };
                 pnl7Seg.Controls.Add(lblDigits[i]);
             }
             gbSim.Controls.Add(pnl7Seg);
 
-            Label lblLcdTag = new Label { Text = "Màn hình LCD 1602 (I2C)", Location = new Point(20, 108), AutoSize = true, ForeColor = Color.FromArgb(160, 180, 200) };
-            Label lbl7SegTag = new Label { Text = "Màn hình 8 LED 7 đoạn TM1638", Location = new Point(430, 108), AutoSize = true, ForeColor = Color.FromArgb(160, 180, 200) };
+            Label lblLcdTag = new Label { Text = "Màn hình LCD 1602 (I2C)", Location = new Point(15, 106), AutoSize = true, ForeColor = Color.FromArgb(150, 175, 195) };
+            Label lbl7SegTag = new Label { Text = "Màn hình 8 LED 7 đoạn TM1638", Location = new Point(490, 106), AutoSize = true, ForeColor = Color.FromArgb(150, 175, 195) };
             gbSim.Controls.AddRange(new Control[] { lblLcdTag, lbl7SegTag });
             this.Controls.Add(gbSim);
 
-            // 7. GIÁM SÁT LED & PHÍM TM1638
-            GroupBox gbHardware = CreateCard("6. GIÁM SÁT 8 ĐÈN LED & 8 NÚT BẤM TM1638", new Point(15, 620), new Size(1010, 90));
-            string[] ledNames = { "M1:RUN", "M2:RUN", "M1:CW", "M2:CW", "TARGET", "SPD1", "SPD2", "SPD3" };
+            // 6. GIÁM SÁT 8 LED & 8 PHÍM TM1638
+            GroupBox gbHardware = CreateCard("5. GIÁM SÁT 8 ĐÈN LED & 8 NÚT BẤM TM1638", new Point(15, 822), new Size(660, 105));
+            string[] ledNames = { "M1 RUN", "M2 RUN", "M3 RUN", "M4 RUN", "SEL 1", "SEL 2", "SEL 3", "SEL 4" };
             for (int i = 0; i < 8; i++)
             {
-                btnLeds[i] = new Button { Text = $"{ledNames[i]}\nOFF", Font = new Font("Segoe UI", 7.5f, FontStyle.Bold), Size = new Size(54, 42), Location = new Point(20 + i * 58, 24), BackColor = Color.FromArgb(45, 48, 58), ForeColor = Color.Gray, FlatStyle = FlatStyle.Flat };
+                btnLeds[i] = new Button { Text = $"{ledNames[i]}\nOFF", Font = new Font("Segoe UI", 7.5f, FontStyle.Bold), Size = new Size(68, 44), Location = new Point(15 + i * 78, 24), BackColor = Color.FromArgb(42, 46, 58), ForeColor = Color.Gray, FlatStyle = FlatStyle.Flat };
+                btnLeds[i].FlatAppearance.BorderSize = 0;
                 gbHardware.Controls.Add(btnLeds[i]);
             }
 
-            Label lblSep = new Label { BorderStyle = BorderStyle.Fixed3D, Location = new Point(495, 18), Size = new Size(2, 55) };
-            gbHardware.Controls.Add(lblSep);
-
-            string[] btnNames = { "S1:RUN", "S2:SEL", "S3:SPD+", "S4:SPD-", "S5:M1DIR", "S6:M2DIR", "S7:MODE", "S8:ZERO" };
+            string[] btnNames = { "S1:RUN", "S2:SEL", "S3:SPD+", "S4:SPD-", "S5:DIR", "S6:ENA", "S7:MODE", "S8:ZERO" };
             for (int i = 0; i < 8; i++)
             {
-                lblButtons[i] = new Label { Text = btnNames[i], Font = new Font("Segoe UI", 7.5f, FontStyle.Bold), Size = new Size(55, 42), Location = new Point(515 + i * 59, 24), TextAlign = ContentAlignment.MiddleCenter, BackColor = Color.FromArgb(35, 40, 52), ForeColor = Color.FromArgb(130, 145, 165), BorderStyle = BorderStyle.FixedSingle };
+                lblButtons[i] = new Label { Text = btnNames[i], Font = new Font("Segoe UI", 7.5f, FontStyle.Bold), Size = new Size(68, 22), Location = new Point(15 + i * 78, 73), TextAlign = ContentAlignment.MiddleCenter, BackColor = Color.FromArgb(32, 38, 50), ForeColor = Color.FromArgb(140, 155, 175), BorderStyle = BorderStyle.FixedSingle };
                 gbHardware.Controls.Add(lblButtons[i]);
             }
             this.Controls.Add(gbHardware);
 
-            // 8. LOG
-            GroupBox gbLog = CreateCard("7. NHẬT KÝ SERIAL", new Point(15, 715), new Size(1010, 75));
-            rtbLog = new RichTextBox { Location = new Point(15, 20), Size = new Size(650, 48), BackColor = Color.FromArgb(12, 15, 20), ForeColor = Color.FromArgb(0, 255, 170), Font = new Font("Consolas", 8.5f), ReadOnly = true };
-            gbLog.Controls.Add(rtbLog);
-
-            txtCustomCmd = new TextBox { Location = new Point(680, 30), Size = new Size(220, 26), BackColor = Color.FromArgb(40, 44, 58), ForeColor = Color.White, Text = "MOTOR:RUN_ALL" };
-            Button btnSendCmd = CreateButton("GỬI LỆNH", new Point(910, 28), new Size(85, 28), Color.FromArgb(0, 120, 215));
+            // 7. NHẬT KÝ SERIAL LOG
+            GroupBox gbLog = CreateCard("6. NHẬT KÝ LỆNH SERIAL", new Point(685, 822), new Size(480, 105));
+            rtbLog = new RichTextBox { Location = new Point(12, 22), Size = new Size(456, 44), BackColor = Color.FromArgb(10, 14, 20), ForeColor = Color.FromArgb(0, 255, 170), Font = new Font("Consolas", 8.5f), ReadOnly = true };
+            
+            txtCustomCmd = new TextBox { Location = new Point(12, 71), Size = new Size(335, 26), BackColor = Color.FromArgb(36, 42, 56), ForeColor = Color.White, Text = "MOTOR:RUN_ALL" };
+            Button btnSendCmd = CreateButton("GỬI LỆNH", new Point(355, 70), new Size(113, 28), Color.FromArgb(0, 120, 215));
             btnSendCmd.Click += (s, e) => SendCommand(txtCustomCmd.Text);
-            gbLog.Controls.AddRange(new Control[] { txtCustomCmd, btnSendCmd });
+
+            gbLog.Controls.AddRange(new Control[] { rtbLog, txtCustomCmd, btnSendCmd });
             this.Controls.Add(gbLog);
         }
 
         private GroupBox CreateCard(string title, Point location, Size size)
         {
-            return new GroupBox { Text = title, Font = new Font("Segoe UI", 9.5f, FontStyle.Bold), ForeColor = Color.FromArgb(0, 210, 255), Location = location, Size = size, BackColor = Color.FromArgb(28, 32, 42) };
+            return new GroupBox
+            {
+                Text = title,
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(0, 210, 255),
+                Location = location,
+                Size = size,
+                BackColor = Color.FromArgb(24, 29, 40)
+            };
         }
 
         private Button CreateButton(string text, Point loc, Size size, Color bg)
         {
-            var btn = new Button { Text = text, Location = loc, Size = size, BackColor = bg, ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold) };
+            var btn = new Button
+            {
+                Text = text,
+                Location = loc,
+                Size = size,
+                BackColor = bg,
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold)
+            };
             btn.FlatAppearance.BorderSize = 0;
             return btn;
         }
@@ -295,148 +346,311 @@ namespace TM1638_GUI
 
         private void BtnConnect_Click(object? sender, EventArgs e)
         {
-            if (serialPort != null && serialPort.IsOpen) DisconnectSerial();
+            if (serialPort != null && serialPort.IsOpen)
+            {
+                DisconnectSerial();
+            }
             else
             {
                 if (cmbPorts.SelectedItem == null) return;
                 string portName = cmbPorts.SelectedItem.ToString() ?? "COM7";
                 try
                 {
-                    serialPort = new SerialPort(portName, 115200, Parity.None, 8, StopBits.One) { ReadTimeout = 500, WriteTimeout = 500 };
+                    serialPort = new SerialPort(portName, 115200, Parity.None, 8, StopBits.One)
+                    {
+                        ReadTimeout = 200,
+                        WriteTimeout = 200,
+                        ReadBufferSize = 8192
+                    };
                     serialPort.DataReceived += SerialPort_DataReceived;
                     serialPort.Open();
 
-                    btnConnect.Text = "NGẮT KẾT NỐI"; btnConnect.BackColor = Color.FromArgb(180, 50, 50);
+                    btnConnect.Text = "NGẮT KẾT NỐI";
+                    btnConnect.BackColor = Color.FromArgb(180, 45, 45);
                     pnlStatusIndicator.BackColor = Color.Lime;
-                    lblStatus.Text = $"Đã kết nối {portName}"; lblStatus.ForeColor = Color.Lime;
+                    lblStatus.Text = $"Đã kết nối {portName}";
+                    lblStatus.ForeColor = Color.Lime;
                     LogMessage($"Đã mở cổng {portName} thành công.");
                     SendCommand("SYNC");
                 }
-                catch (Exception ex) { MessageBox.Show(ex.Message, "Lỗi COM", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message, "Lỗi Kết Nối COM", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
         }
 
         private void DisconnectSerial()
         {
-            try { if (serialPort != null) { if (serialPort.IsOpen) serialPort.Close(); serialPort.Dispose(); serialPort = null; } } catch { }
-            btnConnect.Text = "KẾT NỐI"; btnConnect.BackColor = Color.FromArgb(0, 160, 90);
-            pnlStatusIndicator.BackColor = Color.Red; lblStatus.Text = "Đã ngắt kết nối"; lblStatus.ForeColor = Color.FromArgb(220, 100, 100);
+            try
+            {
+                if (serialPort != null)
+                {
+                    if (serialPort.IsOpen)
+                    {
+                        serialPort.DataReceived -= SerialPort_DataReceived;
+                        serialPort.Close();
+                    }
+                    serialPort.Dispose();
+                    serialPort = null;
+                }
+            }
+            catch { }
+
+            btnConnect.Text = "KẾT NỐI";
+            btnConnect.BackColor = Color.FromArgb(0, 170, 95);
+            pnlStatusIndicator.BackColor = Color.Red;
+            lblStatus.Text = "Đã ngắt kết nối";
+            lblStatus.ForeColor = Color.FromArgb(230, 90, 90);
         }
 
+        // Đọc dữ liệu Asynchronous không gây nghẽn Thread UI
         private void SerialPort_DataReceived(object sender, SerialDataReceivedEventArgs e)
         {
             try
             {
                 if (serialPort == null || !serialPort.IsOpen) return;
-                string line = serialPort.ReadLine().Trim();
-                if (this.IsDisposed || !this.IsHandleCreated) return;
-                this.BeginInvoke(new Action(() => ProcessIncomingMessage(line)));
+                string incoming = serialPort.ReadExisting();
+                
+                lock (lockObj)
+                {
+                    rxBuffer.Append(incoming);
+                    string fullStr = rxBuffer.ToString();
+                    int lastNL = fullStr.LastIndexOf('\n');
+                    if (lastNL >= 0)
+                    {
+                        string processChunk = fullStr.Substring(0, lastNL);
+                        rxBuffer.Remove(0, lastNL + 1);
+
+                        string[] lines = processChunk.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                        foreach (var line in lines)
+                        {
+                            ParsePacketInMemory(line.Trim());
+                        }
+                    }
+                }
             }
             catch { }
         }
 
-        private void ProcessIncomingMessage(string msg)
+        private void ParsePacketInMemory(string msg)
         {
-            if (msg.StartsWith("DUALSTAT:")) ParseDualStatus(msg.Substring(9));
-            else if (msg.StartsWith("BTN:")) UpdateButtonsUI(byte.Parse(msg.Substring(4).Trim(), System.Globalization.NumberStyles.HexNumber));
-            else if (msg.StartsWith("DISP:")) UpdateDisplaySimulator(msg.Substring(5));
-            else if (msg.StartsWith("LEDS:")) UpdateLedsUI(byte.Parse(msg.Substring(5).Trim(), System.Globalization.NumberStyles.HexNumber));
-            else LogMessage($"[ESP32] {msg}");
+            if (msg.StartsWith("QUADSTAT:")) ParseQuadStatusData(msg.Substring(9));
+            else if (msg.StartsWith("DUALSTAT:")) ParseDualStatusData(msg.Substring(9));
+            else if (msg.StartsWith("BTN:"))
+            {
+                if (byte.TryParse(msg.Substring(4).Trim(), System.Globalization.NumberStyles.HexNumber, null, out byte b))
+                {
+                    currentButtonMask = b;
+                    stateDirty = true;
+                }
+            }
+            else if (msg.StartsWith("DISP:"))
+            {
+                current7SegText = msg.Substring(5);
+                stateDirty = true;
+            }
+            else if (msg.StartsWith("LEDS:"))
+            {
+                if (byte.TryParse(msg.Substring(5).Trim(), System.Globalization.NumberStyles.HexNumber, null, out byte l))
+                {
+                    currentLedMask = l;
+                    stateDirty = true;
+                }
+            }
         }
 
-        private void ParseDualStatus(string data)
+        private void ParseQuadStatusData(string data)
         {
             var parts = data.Split(',');
             foreach (var part in parts)
             {
                 var kv = part.Split('='); if (kv.Length != 2) continue;
                 string k = kv[0].Trim(), v = kv[1].Trim();
-                switch (k)
+
+                for (int m = 0; m < 4; m++)
                 {
-                    case "M1_RUN": isRunM1 = (v == "1"); UpdateM1UI(); break;
-                    case "M1_DIR": isDirCW1 = (v == "CW"); UpdateM1UI(); break;
-                    case "M1_SPD": if (uint.TryParse(v, out uint s1)) { speedSPS1 = s1; if (s1 >= tbSpeedM1.Minimum && s1 <= tbSpeedM1.Maximum) tbSpeedM1.Value = (int)s1; } break;
-                    case "M1_POS": if (long.TryParse(v, out long p1)) pos1 = p1; break;
-
-                    case "M2_RUN": isRunM2 = (v == "1"); UpdateM2UI(); break;
-                    case "M2_DIR": isDirCW2 = (v == "CW"); UpdateM2UI(); break;
-                    case "M2_SPD": if (uint.TryParse(v, out uint s2)) { speedSPS2 = s2; if (s2 >= tbSpeedM2.Minimum && s2 <= tbSpeedM2.Maximum) tbSpeedM2.Value = (int)s2; } break;
-                    case "M2_POS": if (long.TryParse(v, out long p2)) pos2 = p2; break;
-
-                    case "SEL":
-                        if (int.TryParse(v, out int sel))
+                    int mNum = m + 1;
+                    if (k == $"M{mNum}_RUN") { motors[m].IsRunning = (v == "1"); motors[m].UI_Dirty = true; }
+                    else if (k == $"M{mNum}_DIR") { motors[m].IsDirCW = (v == "CW"); motors[m].UI_Dirty = true; }
+                    else if (k == $"M{mNum}_ENA") { motors[m].IsEnabled = (v == "1"); motors[m].UI_Dirty = true; }
+                    else if (k == $"M{mNum}_SPD")
+                    {
+                        if (uint.TryParse(v, out uint s))
                         {
-                            selectedTarget = sel;
-                            if (sel == 0) rbSelM1.Checked = true;
-                            else if (sel == 1) rbSelM2.Checked = true;
-                            else rbSelBoth.Checked = true;
+                            motors[m].SpeedSPS = s;
+                            motors[m].UI_Dirty = true;
                         }
-                        break;
+                    }
+                    else if (k == $"M{mNum}_POS")
+                    {
+                        if (long.TryParse(v, out long p))
+                        {
+                            motors[m].CurrentPos = p;
+                            motors[m].UI_Dirty = true;
+                        }
+                    }
+                }
+
+                if (k == "SEL" && int.TryParse(v, out int sel) && sel >= 0 && sel < 5)
+                {
+                    selectedTarget = sel;
+                    stateDirty = true;
+                }
+                else if (k == "MODE" && int.TryParse(v, out int mode) && mode >= 0 && mode < 3)
+                {
+                    currentMode = mode;
+                    stateDirty = true;
+                }
+            }
+        }
+
+        private void ParseDualStatusData(string data)
+        {
+            var parts = data.Split(',');
+            foreach (var part in parts)
+            {
+                var kv = part.Split('='); if (kv.Length != 2) continue;
+                string k = kv[0].Trim(), v = kv[1].Trim();
+
+                for (int m = 0; m < 2; m++)
+                {
+                    int mNum = m + 1;
+                    if (k == $"M{mNum}_RUN") { motors[m].IsRunning = (v == "1"); motors[m].UI_Dirty = true; }
+                    else if (k == $"M{mNum}_DIR") { motors[m].IsDirCW = (v == "CW"); motors[m].UI_Dirty = true; }
+                    else if (k == $"M{mNum}_SPD")
+                    {
+                        if (uint.TryParse(v, out uint s))
+                        {
+                            motors[m].SpeedSPS = s;
+                            motors[m].UI_Dirty = true;
+                        }
+                    }
+                    else if (k == $"M{mNum}_POS")
+                    {
+                        if (long.TryParse(v, out long p))
+                        {
+                            motors[m].CurrentPos = p;
+                            motors[m].UI_Dirty = true;
+                        }
+                    }
+                }
+
+                if (k == "SEL" && int.TryParse(v, out int sel) && sel >= 0 && sel < 5)
+                {
+                    selectedTarget = sel;
+                    stateDirty = true;
+                }
+            }
+        }
+
+        // HÀM RENDER UI ĐỊNH KỲ MƯỢT MÀ (20 FPS - DÙNG TIMER KHÔNG KHỰNG KHÓA UI)
+        private void UiRenderTimer_Tick(object? sender, EventArgs e)
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                if (motors[i].UI_Dirty)
+                {
+                    motors[i].UI_Dirty = false;
+                    UpdateMotorCardRender(i);
                 }
             }
 
-            UpdateLcdSimulator();
+            if (stateDirty)
+            {
+                stateDirty = false;
+                UpdateGlobalStateRender();
+            }
         }
 
-        private void UpdateM1UI()
+        private void UpdateMotorCardRender(int idx)
         {
-            btnRunM1.Text = isRunM1 ? "⏸ DỪNG M1" : "▶ CHẠY M1";
-            btnRunM1.BackColor = isRunM1 ? Color.FromArgb(220, 40, 40) : Color.FromArgb(0, 160, 80);
-            btnDirM1.Text = isDirCW1 ? "↻ THUẬN (CW)" : "↺ NGHỊCH (CCW)";
-            btnDirM1.BackColor = isDirCW1 ? Color.FromArgb(0, 130, 200) : Color.FromArgb(200, 120, 0);
+            var m = motors[idx];
+            m.BtnRun.Text = m.IsRunning ? $"⏸ DỪNG M{idx + 1}" : $"▶ CHẠY M{idx + 1}";
+            m.BtnRun.BackColor = m.IsRunning ? Color.FromArgb(220, 40, 40) : Color.FromArgb(0, 160, 80);
+
+            m.BtnDir.Text = m.IsDirCW ? "↻ THUẬN (CW)" : "↺ NGHỊCH (CCW)";
+            m.BtnDir.BackColor = m.IsDirCW ? Color.FromArgb(0, 130, 200) : Color.FromArgb(200, 120, 0);
+
+            m.BtnEna.Text = m.IsEnabled ? "🔒 KHÓA TRỤC" : "🔓 MỞ TRỤC";
+            m.BtnEna.BackColor = m.IsEnabled ? Color.FromArgb(100, 50, 150) : Color.FromArgb(80, 85, 95);
+
+            m.LblPos.Text = $"Vị trí: {m.CurrentPos} xung";
+
+            // Chỉ cập nhật TrackBar khi người dùng không kéo giữ chuột
+            if (!m.TbSpeed.Capture && m.TbSpeed.Value != (int)m.SpeedSPS)
+            {
+                if (m.SpeedSPS >= m.TbSpeed.Minimum && m.SpeedSPS <= m.TbSpeed.Maximum)
+                {
+                    m.TbSpeed.Value = (int)m.SpeedSPS;
+                    float rpm = (m.SpeedSPS / 1600.0f) * 60.0f;
+                    m.LblSpeedVal.Text = $"Tốc độ M{idx + 1}: {m.SpeedSPS} SPS (~ {rpm:F0} RPM)";
+                }
+            }
         }
 
-        private void UpdateM2UI()
+        private void UpdateGlobalStateRender()
         {
-            btnRunM2.Text = isRunM2 ? "⏸ DỪNG M2" : "▶ CHẠY M2";
-            btnRunM2.BackColor = isRunM2 ? Color.FromArgb(220, 40, 40) : Color.FromArgb(0, 160, 80);
-            btnDirM2.Text = isDirCW2 ? "↻ THUẬN (CW)" : "↺ NGHỊCH (CCW)";
-            btnDirM2.BackColor = isDirCW2 ? Color.FromArgb(0, 130, 200) : Color.FromArgb(200, 120, 0);
-        }
+            // Update Radio Target
+            if (selectedTarget >= 0 && selectedTarget < 5 && !rbTargets[selectedTarget].Checked)
+            {
+                rbTargets[selectedTarget].Checked = true;
+            }
 
-        private void UpdateLcdSimulator()
-        {
-            float rpm1 = (speedSPS1 / 1600.0f) * 60.0f;
-            float rpm2 = (speedSPS2 / 1600.0f) * 60.0f;
-            lblLcdLine1.Text = $"M1:{(isRunM1 ? "RUN " : "STOP")}{rpm1,4:F0}{(isDirCW1 ? "CW " : "CCW")} {(selectedTarget != 1 ? '*' : ' ')}";
-            lblLcdLine2.Text = $"M2:{(isRunM2 ? "RUN " : "STOP")}{rpm2,4:F0}{(isDirCW2 ? "CW " : "CCW")} {(selectedTarget != 0 ? '*' : ' ')}";
-        }
+            // Update Radio Mode
+            if (currentMode >= 0 && currentMode < 3 && !rbModes[currentMode].Checked)
+            {
+                rbModes[currentMode].Checked = true;
+            }
 
-        private void UpdateDisplaySimulator(string text)
-        {
+            // Update LCD Simulator
+            float rpm1 = (motors[0].SpeedSPS / 1600.0f) * 60.0f;
+            float rpm2 = (motors[1].SpeedSPS / 1600.0f) * 60.0f;
+            float rpm3 = (motors[2].SpeedSPS / 1600.0f) * 60.0f;
+            float rpm4 = (motors[3].SpeedSPS / 1600.0f) * 60.0f;
+
+            lblLcdLine1.Text = string.Format("1{0}{1}{2,3:F0} 2{3}{4}{5,3:F0}",
+                (selectedTarget == 0 || selectedTarget == 4) ? '*' : ':',
+                motors[0].IsRunning ? (motors[0].IsDirCW ? '+' : '-') : 'S', rpm1,
+                (selectedTarget == 1 || selectedTarget == 4) ? '*' : ':',
+                motors[1].IsRunning ? (motors[1].IsDirCW ? '+' : '-') : 'S', rpm2);
+
+            lblLcdLine2.Text = string.Format("3{0}{1}{2,3:F0} 4{3}{4}{5,3:F0}",
+                (selectedTarget == 2 || selectedTarget == 4) ? '*' : ':',
+                motors[2].IsRunning ? (motors[2].IsDirCW ? '+' : '-') : 'S', rpm3,
+                (selectedTarget == 3 || selectedTarget == 4) ? '*' : ':',
+                motors[3].IsRunning ? (motors[3].IsDirCW ? '+' : '-') : 'S', rpm4);
+
+            // Update 7-Seg Simulator
             for (int i = 0; i < 8; i++) lblDigits[i].Text = " ";
             int pos = 0;
-            for (int i = 0; i < text.Length && pos < 8; i++)
+            for (int i = 0; i < current7SegText.Length && pos < 8; i++)
             {
-                char c = text[i];
+                char c = current7SegText[i];
                 if (c == '.' && pos > 0) { if (!lblDigits[pos - 1].Text.EndsWith(".")) lblDigits[pos - 1].Text += "."; continue; }
-                if (i + 1 < text.Length && text[i + 1] == '.') { lblDigits[pos].Text = c.ToString() + "."; i++; }
+                if (i + 1 < current7SegText.Length && current7SegText[i + 1] == '.') { lblDigits[pos].Text = c.ToString() + "."; i++; }
                 else lblDigits[pos].Text = c.ToString();
                 pos++;
             }
-        }
 
-        private void UpdateLedsUI(byte mask)
-        {
-            string[] ledNames = { "M1:RUN", "M2:RUN", "M1:CW", "M2:CW", "TARGET", "SPD1", "SPD2", "SPD3" };
+            // Update LEDs
+            string[] ledNames = { "M1 RUN", "M2 RUN", "M3 RUN", "M4 RUN", "SEL 1", "SEL 2", "SEL 3", "SEL 4" };
             for (int i = 0; i < 8; i++)
             {
-                bool isOn = (mask & (1 << i)) != 0;
+                bool isOn = (currentLedMask & (1 << i)) != 0;
                 btnLeds[i].Text = $"{ledNames[i]}\n{(isOn ? "ON" : "OFF")}";
-                btnLeds[i].BackColor = isOn ? Color.FromArgb(220, 30, 30) : Color.FromArgb(45, 48, 58);
+                btnLeds[i].BackColor = isOn ? Color.FromArgb(230, 35, 35) : Color.FromArgb(42, 46, 58);
                 btnLeds[i].ForeColor = isOn ? Color.White : Color.Gray;
             }
-        }
 
-        private void UpdateButtonsUI(byte mask)
-        {
-            string[] btnNames = { "S1:RUN", "S2:SEL", "S3:SPD+", "S4:SPD-", "S5:M1DIR", "S6:M2DIR", "S7:MODE", "S8:ZERO" };
+            // Update Buttons
+            string[] btnNames = { "S1:RUN", "S2:SEL", "S3:SPD+", "S4:SPD-", "S5:DIR", "S6:ENA", "S7:MODE", "S8:ZERO" };
             for (int i = 0; i < 8; i++)
             {
-                bool isPressed = (mask & (1 << i)) != 0;
-                lblButtons[i].Text = $"{btnNames[i]}\n{(isPressed ? "ON" : "OFF")}";
-                lblButtons[i].BackColor = isPressed ? Color.FromArgb(255, 190, 0) : Color.FromArgb(35, 40, 52);
-                lblButtons[i].ForeColor = isPressed ? Color.Black : Color.FromArgb(130, 145, 165);
+                bool isPressed = (currentButtonMask & (1 << i)) != 0;
+                lblButtons[i].Text = $"{btnNames[i]}";
+                lblButtons[i].BackColor = isPressed ? Color.FromArgb(255, 185, 0) : Color.FromArgb(32, 38, 50);
+                lblButtons[i].ForeColor = isPressed ? Color.Black : Color.FromArgb(140, 155, 175);
             }
         }
 
@@ -444,14 +658,26 @@ namespace TM1638_GUI
         {
             if (serialPort != null && serialPort.IsOpen)
             {
-                try { serialPort.WriteLine(cmd); LogMessage($"[GỬI] {cmd}"); }
-                catch (Exception ex) { LogMessage($"[LỖI] {ex.Message}"); }
+                try
+                {
+                    serialPort.WriteLine(cmd);
+                    LogMessage($"[GỬI] {cmd}");
+                }
+                catch (Exception ex)
+                {
+                    LogMessage($"[LỖI GỬI] {ex.Message}");
+                }
+            }
+            else
+            {
+                LogMessage($"[CHƯA KẾT NỐI] {cmd}");
             }
         }
 
         private void LogMessage(string text)
         {
             if (rtbLog.IsDisposed) return;
+            if (rtbLog.TextLength > 10000) rtbLog.Clear(); // Giới hạn kích thước log tránh giật
             rtbLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {text}\n");
             rtbLog.SelectionStart = rtbLog.Text.Length;
             rtbLog.ScrollToCaret();
@@ -459,6 +685,7 @@ namespace TM1638_GUI
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            uiRenderTimer?.Stop();
             DisconnectSerial();
             base.OnFormClosing(e);
         }

@@ -170,7 +170,7 @@ char rxBuffer[64];
 uint8_t rxIndex = 0;
 
 // ================= HÀM XỬ LÝ PHÁT XUNG CHO TỪNG ĐỘNG CƠ TRONG NGẮT =================
-inline void IRAM_ATTR stepMotorISR(uint8_t idx) {
+void ARDUINO_ISR_ATTR stepMotorISR(uint8_t idx) {
     portENTER_CRITICAL_ISR(&timerMuxes[idx]);
     MotorState &m = motors[idx];
 
@@ -221,10 +221,10 @@ inline void IRAM_ATTR stepMotorISR(uint8_t idx) {
 }
 
 // 4 ISR Handler riêng biệt cho 4 Timer
-void IRAM_ATTR onTimerM1() { stepMotorISR(0); }
-void IRAM_ATTR onTimerM2() { stepMotorISR(1); }
-void IRAM_ATTR onTimerM3() { stepMotorISR(2); }
-void IRAM_ATTR onTimerM4() { stepMotorISR(3); }
+void ARDUINO_ISR_ATTR onTimerM1() { stepMotorISR(0); }
+void ARDUINO_ISR_ATTR onTimerM2() { stepMotorISR(1); }
+void ARDUINO_ISR_ATTR onTimerM3() { stepMotorISR(2); }
+void ARDUINO_ISR_ATTR onTimerM4() { stepMotorISR(3); }
 
 // ================= CẬP NHẬT TỐC ĐỘ ĐỘNG CƠ =================
 void updateMotorSpeed(uint8_t idx, uint32_t sps) {
