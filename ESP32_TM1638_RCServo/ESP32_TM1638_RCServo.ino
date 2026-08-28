@@ -7,10 +7,10 @@
  * 
  * SƠ ĐỒ ĐẤU NỐI CHÂN CHI TIẾT (ESP32-S3 DEVKITC-1):
  * 
- * 1. NGUỒN CẤP SERVO (Nguồn rời 5V/6V/7.4V - 3A+):
- *    - Dây Đỏ (VCC Servo)   -> +5V / +6V / +7.4V của Nguồn Rời
+ * 1. NGUỒN CẤP SERVO:
+ *    - Dây Đỏ (VCC Servo)   -> +5V / +6V / +12.6V của Bộ Nguồn
  *    - Dây Nâu/Đen (GND)    -> (-) GND Nguồn Rời + NỐI CHUNG VỚI GND ESP32-S3
- *    - Dây Cam/Vàng (Signal)-> GPIO 4 trên ESP32-S3
+ *    - Dây Cam/Vàng/Trắng   -> GPIO 4 trên ESP32-S3 (Tín hiệu Signal)
  * 
  * 2. MODULE TM1638:
  *    - STB -> GPIO 15, CLK -> GPIO 16, DIO -> GPIO 17, VCC -> 5V, GND -> GND
@@ -37,7 +37,7 @@
 #define PIN_SERVO1    4
 
 #define SERVO_FREQ_HZ 50
-#define SERVO_RES_BITS 16
+#define SERVO_RES_BITS 14   // ESP32 hỗ trợ chuẩn 14-bit tại 50Hz (Max = 16384)
 #define SERVO_MIN_US  500
 #define SERVO_MAX_US  2500
 
@@ -50,7 +50,7 @@ uint16_t servoAngle = 90; // Góc quay mặc định 90 độ
 bool isSweepMode = false;
 bool sweepDirUp = true;
 uint32_t lastSweepTime = 0;
-uint16_t sweepIntervalMs = 15; // Tốc độ quét mượt
+uint16_t sweepIntervalMs = 15;
 
 // Phím bấm TM1638
 uint8_t lastStableButtons = 0x00;
@@ -66,14 +66,17 @@ uint32_t lastSerialReport = 0;
 char rxBuffer[64];
 uint8_t rxIndex = 0;
 
-// ================= HÀM ĐẶT GÓC QUAY SERVO (PWM HARDWARE) =================
+// ================= HÀM ĐẶT GÓC QUAY SERVO (PWM CHUẨN ESP32) =================
 void writeServoAngle(uint16_t angle) {
     if (angle > 180) angle = 180;
     servoAngle = angle;
 
+    // Tính thời gian xung tính bằng microsecond (500us -> 2500us)
     uint32_t pulseUs = SERVO_MIN_US + ((uint32_t)angle * (SERVO_MAX_US - SERVO_MIN_US) / 180);
-    // Tính duty cycle 16-bit (Period = 20000us)
-    uint32_t duty = (pulseUs * 65535ULL) / 20000ULL;
+    
+    // Tính duty cycle chuẩn 14-bit (Period = 20,000us, Max Duty = 16383)
+    uint32_t maxDuty = (1 << SERVO_RES_BITS) - 1;
+    uint32_t duty = (pulseUs * maxDuty) / 20000ULL;
 
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
     ledcWrite(PIN_SERVO1, duty);
@@ -101,9 +104,6 @@ void updateTM1638Display() {
     snprintf(dispStr, sizeof(dispStr), "S1- %3d\xDF", servoAngle);
     tm.setString(dispStr);
 
-    // 8 LED đơn:
-    // LED 1: Đèn báo chế độ SWEEP
-    // LED 2..8: Thanh Mức Góc Quay (0 -> 180 độ)
     uint8_t ledMask = 0;
     if (isSweepMode) ledMask |= (1 << 0);
 
@@ -218,9 +218,9 @@ void setup() {
     delay(300);
     Serial.println("\n=== ESP32-S3 SINGLE RC DIGITAL SERVO CONTROLLER (SV1 - GPIO 4) ===");
 
-    // 1. Cấu hình PWM Hardware LEDC cho 1 Servo RC (GPIO 4)
+    // 1. Cấu hình PWM Hardware LEDC cho 1 Servo RC (GPIO 4) - Chuẩn 14-bit 50Hz
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
-    ledcAttachChannel(PIN_SERVO1, SERVO_FREQ_HZ, SERVO_RES_BITS, 0);
+    ledcAttach(PIN_SERVO1, SERVO_FREQ_HZ, SERVO_RES_BITS);
 #else
     ledcSetup(0, SERVO_FREQ_HZ, SERVO_RES_BITS);
     ledcAttachPin(PIN_SERVO1, 0);
@@ -281,7 +281,7 @@ void loop() {
     if ((lastStableButtons & (1 << 0)) || (lastStableButtons & (1 << 1))) {
         uint32_t holdDuration = millis() - buttonPressStartTime;
         if (holdDuration >= 300) {
-            if (millis() - lastHoldTime >= 30) { // Cập nhật mượt mỗi 30ms
+            if (millis() - lastHoldTime >= 30) {
                 lastHoldTime = millis();
                 if (lastStableButtons & (1 << 0)) {
                     if (servoAngle < 180) writeServoAngle(servoAngle + 1);
