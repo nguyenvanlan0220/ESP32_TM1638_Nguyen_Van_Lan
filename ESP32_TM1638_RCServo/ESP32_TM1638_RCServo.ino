@@ -1,22 +1,26 @@
 /**
  * ============================================================================
- * Dự án: ESP32-S3 + TM1638 + LCD I2C + 1 ĐỘNG CƠ RC DIGITAL SERVO (50Hz PWM)
+ * Dự án: ESP32-S3 + TM1638 + LCD I2C + MẠCH ĐỆM 74HC245 + 1 ĐỘNG CƠ RC DIGITAL SERVO (12V HV)
  * Nhánh: feature/rc-digital-servo
  * Tác giả: Nguyễn Văn Lân
  * ============================================================================
  * 
- * SƠ ĐỒ ĐẤU NỐI CHÂN CHI TIẾT (ESP32-S3 DEVKITC-1):
+ * HỆ THỐNG PHẦN CỨNG CHI TIẾT:
+ * 1. NGUỒN CẤP & HẠ ÁP:
+ *    - Nguồn 12V DC Chính : Nuôi VCC Động cơ Servo 12V (Dây Đỏ) & VCC IN+ Mạch hạ áp.
+ *    - Mạch Hạ Áp (12V->5V): Cấp VCC IC đệm 74HC245 (Chân 20), 5V ESP32-S3, TM1638, LCD I2C.
+ *    - Mass Chung (GND)   : Nối liền GND 12V, GND 5V, GND ESP32, GND 74HC245, GND Servo, GND TM1638/LCD.
  * 
- * 1. NGUỒN CẤP SERVO:
- *    - Dây Đỏ (VCC Servo)   -> +5V / +6V / +12.6V của Bộ Nguồn
- *    - Dây Nâu/Đen (GND)    -> (-) GND Nguồn Rời + NỐI CHUNG VỚI GND ESP32-S3
- *    - Dây Cam/Vàng/Trắng   -> GPIO 4 trên ESP32-S3 (Tín hiệu Signal)
+ * 2. MẠCH ĐỆM IC 74HC245 (SSOP20 Adapter Board):
+ *    - Chân 20 (VCC) & Chân 1 (DIR) -> +5V (Từ Mạch hạ áp)
+ *    - Chân 10 (GND) & Chân 19 (/OE)-> GND chung
+ *    - Chân 2  (A1 Input)  <- GPIO 4 trên ESP32-S3 (Xung PWM 3.3V)
+ *    - Chân 18 (B1 Output) -> Dây Cam/Vàng Signal Servo (Xung PWM 5V)
+ *    - Chân 3..9 (A2..A8)  -> Nối GND chung (Chống trôi ngõ vào)
  * 
- * 2. MODULE TM1638:
- *    - STB -> GPIO 15, CLK -> GPIO 16, DIO -> GPIO 17, VCC -> 5V, GND -> GND
- * 
- * 3. LCD 1602 I2C:
- *    - SDA -> GPIO 8, SCL -> GPIO 9, VCC -> 5V, GND -> GND
+ * 3. MODULE TM1638 & LCD 1602 I2C:
+ *    - TM1638  : STB -> GPIO 15, CLK -> GPIO 16, DIO -> GPIO 17, VCC -> 5V, GND -> GND
+ *    - LCD I2C : SDA -> GPIO 8, SCL -> GPIO 9, VCC -> 5V, GND -> GND
  * ============================================================================
  */
 
@@ -36,17 +40,18 @@
 
 #define PIN_SERVO1    4
 
-#define SERVO_FREQ_HZ 50
-#define SERVO_RES_BITS 14   // ESP32 hỗ trợ chuẩn 14-bit tại 50Hz (Max = 16384)
-#define SERVO_MIN_US  500
-#define SERVO_MAX_US  2500
+#define SERVO_FREQ_HZ   50
+#define SERVO_RES_BITS  14   // ESP32 hỗ trợ chuẩn 14-bit tại 50Hz (Max = 16384)
+#define SERVO_MIN_US    500
+#define SERVO_MAX_US    2500
+#define SERVO_MAX_ANGLE 270  // Cấu hình góc quay tối đa 270 độ
 
 // ================= KHỞI TẠO BIẾN TOÀN CỤC =================
 TM1638_Driver tm(PIN_TM_STB, PIN_TM_CLK, PIN_TM_DIO);
 LiquidCrystal_I2C* lcd = nullptr;
 uint8_t currentLcdAddr = 0x27;
 
-uint16_t servoAngle = 90; // Góc quay mặc định 90 độ
+uint16_t servoAngle = 135; // Góc quay trung tâm mặc định 135 độ (cho Servo 270°)
 bool isSweepMode = false;
 bool sweepDirUp = true;
 uint32_t lastSweepTime = 0;
@@ -68,12 +73,11 @@ uint8_t rxIndex = 0;
 
 // ================= HÀM ĐẶT GÓC QUAY SERVO (PWM CHUẨN ESP32) =================
 void writeServoAngle(uint16_t angle) {
-    if (angle > 180) angle = 180;
+    if (angle > SERVO_MAX_ANGLE) angle = SERVO_MAX_ANGLE;
     servoAngle = angle;
+    // Tính thời gian xung tính bằng microsecond (500us -> 2500us tương ứng 0° -> 270°)
+    uint32_t pulseUs = SERVO_MIN_US + ((uint32_t)angle * (SERVO_MAX_US - SERVO_MIN_US) / SERVO_MAX_ANGLE);
 
-    // Tính thời gian xung tính bằng microsecond (500us -> 2500us)
-    uint32_t pulseUs = SERVO_MIN_US + ((uint32_t)angle * (SERVO_MAX_US - SERVO_MIN_US) / 180);
-    
     // Tính duty cycle chuẩn 14-bit (Period = 20,000us, Max Duty = 16383)
     uint32_t maxDuty = (1 << SERVO_RES_BITS) - 1;
     uint32_t duty = (pulseUs * maxDuty) / 20000ULL;
@@ -107,7 +111,7 @@ void updateTM1638Display() {
     uint8_t ledMask = 0;
     if (isSweepMode) ledMask |= (1 << 0);
 
-    uint8_t levelBars = (servoAngle * 7) / 180;
+    uint8_t levelBars = (servoAngle * 7) / SERVO_MAX_ANGLE;
     for (uint8_t i = 0; i <= levelBars && i < 7; i++) {
         ledMask |= (1 << (1 + i));
     }
@@ -148,7 +152,7 @@ void executeSerialCommand(const char* cmd) {
         sendFullStatusToGUI();
     }
     else if (strcmp(cmd, "SERVO:CENTER") == 0) {
-        writeServoAngle(90);
+        writeServoAngle(135);
         sendFullStatusToGUI();
     }
     else if (strcmp(cmd, "STATUS") == 0 || strcmp(cmd, "SYNC") == 0) {
@@ -190,23 +194,23 @@ void handleButtonPress(uint8_t btnMask) {
     else if (btnMask & (1 << 2)) {
         writeServoAngle(0);
     }
-    // S4: Đặt góc 45°
+    // S4: Đặt góc 67° (Góc 1/4)
     else if (btnMask & (1 << 3)) {
-        writeServoAngle(45);
+        writeServoAngle(67);
     }
-    // S5: Đặt góc Trung tâm 90°
+    // S5: Đặt góc Trung tâm 135° (Góc 1/2)
     else if (btnMask & (1 << 4)) {
-        writeServoAngle(90);
-    }
-    // S6: Đặt góc 135°
-    else if (btnMask & (1 << 5)) {
         writeServoAngle(135);
     }
-    // S7: Đặt góc 180°
-    else if (btnMask & (1 << 6)) {
-        writeServoAngle(180);
+    // S6: Đặt góc 200° (Góc 3/4)
+    else if (btnMask & (1 << 5)) {
+        writeServoAngle(200);
     }
-    // S8: Bật / Tắt chế độ tự động quét SWEEP (0° -> 180°)
+    // S7: Đặt góc tối đa 270°
+    else if (btnMask & (1 << 6)) {
+        writeServoAngle(270);
+    }
+    // S8: Bật / Tắt chế độ tự động quét SWEEP (0° -> 270°)
     else if (btnMask & (1 << 7)) {
         isSweepMode = !isSweepMode;
     }
@@ -216,7 +220,7 @@ void handleButtonPress(uint8_t btnMask) {
 void setup() {
     Serial.begin(115200);
     delay(300);
-    Serial.println("\n=== ESP32-S3 SINGLE RC DIGITAL SERVO CONTROLLER (SV1 - GPIO 4) ===");
+    Serial.println("\n=== ESP32-S3 SINGLE RC DIGITAL SERVO CONTROLLER (74HC245 BUFFER - GPIO 4) ===");
 
     // 1. Cấu hình PWM Hardware LEDC cho 1 Servo RC (GPIO 4) - Chuẩn 14-bit 50Hz
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
@@ -225,7 +229,7 @@ void setup() {
     ledcSetup(0, SERVO_FREQ_HZ, SERVO_RES_BITS);
     ledcAttachPin(PIN_SERVO1, 0);
 #endif
-    writeServoAngle(90); // Đưa Servo về góc 90 độ mặc định
+    writeServoAngle(135); // Đưa Servo về góc trung tâm 135 độ mặc định
 
     // 2. Khởi tạo bus I2C & LCD
     pinMode(PIN_I2C_SDA, INPUT_PULLUP);
@@ -250,7 +254,7 @@ void setup() {
     delay(600);
     tm.clear();
 
-    Serial.println("[SYSTEM] KHOI TAO THANH CONG 1 RC DIGITAL SERVO TAI GPIO 4!");
+    Serial.println("[SYSTEM] KHOI TAO THANH CONG 1 RC DIGITAL SERVO (12V) VIA 74HC245 BUFFER TAI GPIO 4!");
 }
 
 // ================= LOOP =================
@@ -284,7 +288,7 @@ void loop() {
             if (millis() - lastHoldTime >= 30) {
                 lastHoldTime = millis();
                 if (lastStableButtons & (1 << 0)) {
-                    if (servoAngle < 180) writeServoAngle(servoAngle + 1);
+                    if (servoAngle < SERVO_MAX_ANGLE) writeServoAngle(servoAngle + 1);
                 } else if (lastStableButtons & (1 << 1)) {
                     if (servoAngle > 0) writeServoAngle(servoAngle - 1);
                 }
@@ -292,11 +296,11 @@ void loop() {
         }
     }
 
-    // Chế độ tự động quét SWEEP (0° -> 180° -> 0°)
+    // Chế độ tự động quét SWEEP (0° -> 270° -> 0°)
     if (isSweepMode && (millis() - lastSweepTime >= sweepIntervalMs)) {
         lastSweepTime = millis();
         if (sweepDirUp) {
-            if (servoAngle < 180) writeServoAngle(servoAngle + 1);
+            if (servoAngle < SERVO_MAX_ANGLE) writeServoAngle(servoAngle + 1);
             else sweepDirUp = false;
         } else {
             if (servoAngle > 0) writeServoAngle(servoAngle - 1);

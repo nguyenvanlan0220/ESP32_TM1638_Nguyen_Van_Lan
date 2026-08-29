@@ -13,7 +13,7 @@ namespace TM1638_Servo_GUI
         private readonly object lockObj = new object();
 
         // Trạng thái Động cơ Servo 1
-        private int servoAngle = 90;
+        private int servoAngle = 135;
         private bool isSweepMode = false;
         private bool stateDirty = true;
 
@@ -87,7 +87,7 @@ namespace TM1638_Servo_GUI
             };
             Label lblSub = new Label
             {
-                Text = "Giao diện chuyên dụng điều khiển Động Cơ RC Digital Servo (50Hz PWM, 0° - 180°) | Nguyễn Văn Lân",
+                Text = "Giao diện chuyên dụng điều khiển Động Cơ RC Digital Servo (50Hz PWM, 0° - 270°) | Nguyễn Văn Lân",
                 Font = new Font("Segoe UI", 8.5f, FontStyle.Regular),
                 ForeColor = Color.FromArgb(150, 170, 195),
                 Location = new Point(22, 38),
@@ -129,24 +129,24 @@ namespace TM1638_Servo_GUI
             // Hiển thị góc quay kỹ thuật số lớn
             lblAngleValue = new Label
             {
-                Text = "GÓC QUAY: 90°",
+                Text = "GÓC QUAY: 135°",
                 Font = new Font("Segoe UI", 20f, FontStyle.Bold),
                 ForeColor = Color.FromArgb(255, 190, 0),
                 Location = new Point(20, 25),
                 AutoSize = true
             };
 
-            // Nút Sweep Mode
+            // Nút Sweep Toggle
             btnSweepToggle = CreateButton("🔄 BẬT TỰ ĐỘNG QUÉT (SWEEP)", new Point(660, 25), new Size(280, 42), Color.FromArgb(0, 140, 200));
             btnSweepToggle.Click += (s, e) => SendCommand(isSweepMode ? "SERVO:SWEEP:0" : "SERVO:SWEEP:1");
 
-            // Thanh trượt điều chỉnh góc (0 -> 180 độ)
+            // Thanh trượt điều chỉnh góc (0 -> 270 độ)
             tbServoAngle = new TrackBar
             {
                 Minimum = 0,
-                Maximum = 180,
-                Value = 90,
-                TickFrequency = 10,
+                Maximum = 270,
+                Value = 135,
+                TickFrequency = 15,
                 Location = new Point(15, 75),
                 Size = new Size(935, 45)
             };
@@ -160,17 +160,17 @@ namespace TM1638_Servo_GUI
             Button btn0 = CreateButton("0° (Min)", new Point(20, btnY), new Size(110, 36), Color.FromArgb(60, 70, 90));
             btn0.Click += (s, e) => SendCommand("SV1:0");
 
-            Button btn45 = CreateButton("45°", new Point(140, btnY), new Size(110, 36), Color.FromArgb(60, 70, 90));
-            btn45.Click += (s, e) => SendCommand("SV1:45");
+            Button btn67 = CreateButton("67°", new Point(140, btnY), new Size(110, 36), Color.FromArgb(60, 70, 90));
+            btn67.Click += (s, e) => SendCommand("SV1:67");
 
-            Button btn90 = CreateButton("90° (Trung Tâm)", new Point(260, btnY), new Size(150, 36), Color.FromArgb(0, 160, 90));
-            btn90.Click += (s, e) => SendCommand("SV1:90");
-
-            Button btn135 = CreateButton("135°", new Point(420, btnY), new Size(110, 36), Color.FromArgb(60, 70, 90));
+            Button btn135 = CreateButton("135° (Trung Tâm)", new Point(260, btnY), new Size(150, 36), Color.FromArgb(0, 160, 90));
             btn135.Click += (s, e) => SendCommand("SV1:135");
 
-            Button btn180 = CreateButton("180° (Max)", new Point(540, btnY), new Size(110, 36), Color.FromArgb(60, 70, 90));
-            btn180.Click += (s, e) => SendCommand("SV1:180");
+            Button btn200 = CreateButton("200°", new Point(420, btnY), new Size(110, 36), Color.FromArgb(60, 70, 90));
+            btn200.Click += (s, e) => SendCommand("SV1:200");
+
+            Button btn270 = CreateButton("270° (Max)", new Point(540, btnY), new Size(110, 36), Color.FromArgb(60, 70, 90));
+            btn270.Click += (s, e) => SendCommand("SV1:270");
 
             // Nút tinh chỉnh góc (+- 1° và +- 5°)
             Button btnDec5 = CreateButton("-5°", new Point(670, btnY), new Size(60, 36), Color.FromArgb(180, 80, 40));
@@ -180,14 +180,14 @@ namespace TM1638_Servo_GUI
             btnDec1.Click += (s, e) => SendCommand($"SV1:{Math.Max(0, servoAngle - 1)}");
 
             Button btnInc1 = CreateButton("+1°", new Point(806, btnY), new Size(60, 36), Color.FromArgb(140, 70, 30));
-            btnInc1.Click += (s, e) => SendCommand($"SV1:{Math.Min(180, servoAngle + 1)}");
+            btnInc1.Click += (s, e) => SendCommand($"SV1:{Math.Min(270, servoAngle + 1)}");
 
             Button btnInc5 = CreateButton("+5°", new Point(874, btnY), new Size(65, 36), Color.FromArgb(180, 80, 40));
-            btnInc5.Click += (s, e) => SendCommand($"SV1:{Math.Min(180, servoAngle + 5)}");
+            btnInc5.Click += (s, e) => SendCommand($"SV1:{Math.Min(270, servoAngle + 5)}");
 
             gbServo.Controls.AddRange(new Control[] {
                 lblAngleValue, btnSweepToggle, tbServoAngle,
-                btn0, btn45, btn90, btn135, btn180,
+                btn0, btn67, btn135, btn200, btn270,
                 btnDec5, btnDec1, btnInc1, btnInc5
             });
             this.Controls.Add(gbServo);
@@ -197,7 +197,7 @@ namespace TM1638_Servo_GUI
 
             Panel pnlLcd = new Panel { Location = new Point(15, 23), Size = new Size(400, 78), BackColor = Color.FromArgb(8, 40, 52), BorderStyle = BorderStyle.Fixed3D };
             lblLcdLine1 = new Label { Text = "1x RC SERVO S1 ", Font = new Font("Consolas", 13f, FontStyle.Bold), ForeColor = Color.FromArgb(0, 255, 230), Location = new Point(8, 10), AutoSize = true };
-            lblLcdLine2 = new Label { Text = "GOC: 90\xDF  [MANUAL]", Font = new Font("Consolas", 13f, FontStyle.Bold), ForeColor = Color.FromArgb(0, 255, 230), Location = new Point(8, 40), AutoSize = true };
+            lblLcdLine2 = new Label { Text = "GOC:135\xDF  [MANUAL]", Font = new Font("Consolas", 13f, FontStyle.Bold), ForeColor = Color.FromArgb(0, 255, 230), Location = new Point(8, 40), AutoSize = true };
             pnlLcd.Controls.Add(lblLcdLine1); pnlLcd.Controls.Add(lblLcdLine2);
             gbSim.Controls.Add(pnlLcd);
 
@@ -224,7 +224,7 @@ namespace TM1638_Servo_GUI
                 gbHardware.Controls.Add(btnLeds[i]);
             }
 
-            string[] btnNames = { "S1:+5°", "S2:-5°", "S3:0°", "S4:45°", "S5:90°", "S6:135°", "S7:180°", "S8:SWEEP" };
+            string[] btnNames = { "S1:+5°", "S2:-5°", "S3:0°", "S4:67°", "S5:135°", "S6:200°", "S7:270°", "S8:SWEEP" };
             for (int i = 0; i < 8; i++)
             {
                 lblButtons[i] = new Label { Text = btnNames[i], Font = new Font("Segoe UI", 7.5f, FontStyle.Bold), Size = new Size(106, 22), Location = new Point(15 + i * 118, 73), TextAlign = ContentAlignment.MiddleCenter, BackColor = Color.FromArgb(32, 38, 50), ForeColor = Color.FromArgb(140, 155, 175), BorderStyle = BorderStyle.FixedSingle };
@@ -236,7 +236,7 @@ namespace TM1638_Servo_GUI
             GroupBox gbLog = CreateCard("5. NHẬT KÝ LỆNH SERIAL", new Point(15, 650), new Size(970, 210));
             rtbLog = new RichTextBox { Location = new Point(15, 25), Size = new Size(940, 130), BackColor = Color.FromArgb(10, 14, 20), ForeColor = Color.FromArgb(0, 255, 170), Font = new Font("Consolas", 9f), ReadOnly = true };
             
-            txtCustomCmd = new TextBox { Location = new Point(15, 168), Size = new Size(780, 26), BackColor = Color.FromArgb(36, 42, 56), ForeColor = Color.White, Text = "SV1:90" };
+            txtCustomCmd = new TextBox { Location = new Point(15, 168), Size = new Size(780, 26), BackColor = Color.FromArgb(36, 42, 56), ForeColor = Color.White, Text = "SV1:135" };
             Button btnSendCmd = CreateButton("GỬI LỆNH", new Point(805, 166), new Size(150, 30), Color.FromArgb(0, 120, 215));
             btnSendCmd.Click += (s, e) => SendCommand(txtCustomCmd.Text);
 
@@ -458,7 +458,7 @@ namespace TM1638_Servo_GUI
             // LEDs Bar
             byte ledMask = 0;
             if (isSweepMode) ledMask |= 1;
-            int levelBars = (servoAngle * 7) / 180;
+            int levelBars = (servoAngle * 7) / 270;
             for (int i = 0; i <= levelBars && i < 7; i++) ledMask |= (byte)(1 << (1 + i));
 
             string[] ledNames = { "SWEEP", "BAR 1", "BAR 2", "BAR 3", "BAR 4", "BAR 5", "BAR 6", "BAR 7" };
@@ -471,7 +471,7 @@ namespace TM1638_Servo_GUI
             }
 
             // Buttons
-            string[] btnNames = { "S1:+5°", "S2:-5°", "S3:0°", "S4:45°", "S5:90°", "S6:135°", "S7:180°", "S8:SWEEP" };
+            string[] btnNames = { "S1:+5°", "S2:-5°", "S3:0°", "S4:67°", "S5:135°", "S6:200°", "S7:270°", "S8:SWEEP" };
             for (int i = 0; i < 8; i++)
             {
                 bool isPressed = (currentButtonMask & (1 << i)) != 0;
